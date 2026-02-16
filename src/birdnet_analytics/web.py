@@ -12,6 +12,12 @@ from fastapi.responses import HTMLResponse
 from birdnet_analytics.config import load_settings
 from birdnet_analytics.db import BirdnetDb, guess_lat_lon
 from birdnet_analytics.sun import compute_sun_times, dawn_window
+from birdnet_analytics.weather import (
+    open_cache,
+    get_cached_range,
+    upsert_many,
+    fetch_open_meteo_daily_precip_mm,
+)
 
 
 def _resolve_birdnet_db_path() -> Path:
@@ -152,6 +158,29 @@ def create_app() -> FastAPI:
             parts = _dayparts()
             rows_out: list[dict] = []
 
+            # Weather: daily precipitation totals (mm), cached locally.
+            # We fetch for the same date window we return.
+            cache_path = Path(os.getenv("BIRDNET_ANALYTICS_WEATHER_CACHE", "_data/weather/weather.sqlite"))
+            with open_cache(cache_path) as wcon:
+                cached = get_cached_range(wcon, start_day, end_day)
+                missing_days = [
+                    start_day + timedelta(days=i)
+                    for i in range((end_day - start_day).days + 1)
+                    if (start_day + timedelta(days=i)) not in cached
+                ]
+                if missing_days:
+                    lat, lon = guess_lat_lon(con)
+                    fetched = fetch_open_meteo_daily_precip_mm(
+                        latitude=lat,
+                        longitude=lon,
+                        start=missing_days[0],
+                        end=missing_days[-1],
+                        tz_name=tz_name_eff,
+                    )
+                    if fetched:
+                        upsert_many(wcon, fetched)
+                        cached.update(get_cached_range(wcon, start_day, end_day))
+
             # Iterate per day, bucket notes.begin_time into fixed local-time dayparts.
             cur_day = start_day
             while cur_day <= end_day:
@@ -174,7 +203,11 @@ def create_app() -> FastAPI:
                             buckets[name] += 1
                             break
 
-                row = {"date": day_s, "unique_species": len(uniq)}
+                row = {
+                    "date": day_s,
+                    "unique_species": len(uniq),
+                    "precip_mm": float(cached.get(cur_day, 0.0)),
+                }
                 row.update(buckets)
                 rows_out.append(row)
                 cur_day += timedelta(days=1)
@@ -644,7 +677,7 @@ _INDEX_HTML = """<!doctype html>
   </div>
 
   <div class=\"card\">
-    <h2 style=\"margin:0 0 8px 0\">Day parts (fixed: 00-06, 06-12, 12-18, 18-24)</h2>
+    <h2 style=\"margin:0 0 8px 0\">Day parts (fixed: 00-06, 06-12, 12-18, 18-24) + precip (mm)</h2>
     <div class=\"row\">
       <div>
         <label for=\"dayparts_days\">Days</label>
@@ -942,17 +975,34 @@ _INDEX_HTML = """<!doctype html>
       pointRadius: 1,
     };
 
+    const precipDataset = {
+      label: 'Precip (mm)',
+      data: data.rows.map(r => r.precip_mm ?? 0),
+      type: 'line',
+      yAxisID: 'y2',
+      borderColor: 'rgba(59, 130, 246, 0.95)',
+      backgroundColor: 'rgba(59, 130, 246, 0.10)',
+      tension: 0.2,
+      pointRadius: 1,
+    };
+
     const ctx = document.getElementById('chart_dayparts');
     if (chartDayparts) chartDayparts.destroy();
     chartDayparts = new Chart(ctx, {
       type: 'bar',
-      data: { labels, datasets: [...barDatasets, uniqDataset] },
+      data: { labels, datasets: [...barDatasets, uniqDataset, precipDataset] },
       options: {
         responsive: true,
         scales: {
           x: { stacked: true },
           y: { stacked: true, beginAtZero: true, position: 'left' },
           y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
+          y2: {
+            beginAtZero: true,
+            position: 'right',
+            grid: { drawOnChartArea: false },
+            title: { display: true, text: 'mm' },
+          },
         }
       }
     });
