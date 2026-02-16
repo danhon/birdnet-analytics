@@ -494,10 +494,7 @@ _INDEX_HTML = """<!doctype html>
         <input id=\"species\" type=\"text\" placeholder=\"(all species)\" list=\"species_list\" autocomplete=\"off\" />
         <datalist id=\"species_list\"></datalist>
       </div>
-      <div>
-        <label for=\"species_days\">Days</label>
-        <input id=\"species_days\" type=\"text\" value=\"all\" />
-      </div>
+      <!-- days filter hidden for now; defaults to all -->
       <div>
         <button id=\"run_species\">Run</button>
       </div>
@@ -536,7 +533,8 @@ _INDEX_HTML = """<!doctype html>
   const wowWeeks = document.getElementById('wow_weeks');
   const daypartsDays = document.getElementById('dayparts_days');
   const speciesInput = document.getElementById('species');
-  const speciesDays = document.getElementById('species_days');
+  // days filter hidden for now; default to all
+  const speciesDays = { value: 'all' };
 
   // default date = today
   const today = new Date();
