@@ -742,12 +742,17 @@ _INDEX_HTML = """<!doctype html>
 
     const labels = data.rows.map(r => r.date);
 
-    // Determine the union of top names across days (cap at a reasonable number)
-    const nameSet = new Set();
+    // Pick the top K species across the whole period (by summed counts) so the stack order is stable.
+    const totals = new Map();
     for (const row of data.rows) {
-      for (const t of (row.top || [])) nameSet.add(t.name);
+      for (const t of (row.top || [])) {
+        totals.set(t.name, (totals.get(t.name) || 0) + (t.count || 0));
+      }
     }
-    const names = Array.from(nameSet);
+    const names = Array.from(totals.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, _]) => name);
 
     function shareFor(row, name) {
       for (const t of (row.top || [])) {
@@ -764,21 +769,30 @@ _INDEX_HTML = """<!doctype html>
       'rgba(153, 102, 255, 0.65)',
     ];
 
-    const datasets = names.map((name, i) => ({
-      label: name,
-      data: data.rows.map(r => shareFor(r, name) * 100.0),
-      backgroundColor: palette[i % palette.length],
-      borderWidth: 0,
-      stack: 'stack1',
-    }));
+    // Dataset order controls stack order (bottom -> top).
+    // Requirement: Other on bottom, then top-3 ascending, so the most common is on top.
+    const datasets = [];
 
-    // Other
+    // Other (always bottom)
     datasets.push({
       label: 'Other',
       data: data.rows.map(r => (r.other_share || 0) * 100.0),
       backgroundColor: 'rgba(200, 200, 200, 0.7)',
       borderWidth: 0,
       stack: 'stack1',
+    });
+
+    // Add #3 then #2 then #1 so #1 ends up on top.
+    const ordered = [...names].reverse();
+    ordered.forEach((name, i) => {
+      const color = palette[i % palette.length];
+      datasets.push({
+        label: name,
+        data: data.rows.map(r => shareFor(r, name) * 100.0),
+        backgroundColor: color,
+        borderWidth: 0,
+        stack: 'stack1',
+      });
     });
 
     const ctx = document.getElementById('chart_topshare');
