@@ -157,13 +157,16 @@ def create_app() -> FastAPI:
             while cur_day <= end_day:
                 day_s = cur_day.isoformat()
                 buckets = {name: 0 for (name, _, _) in parts}
+                uniq: set[str] = set()
 
-                for (bt, conf) in con.execute(
-                    "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+                for (bt, conf, sci) in con.execute(
+                    "SELECT begin_time, confidence, scientific_name FROM notes WHERE date = ? AND begin_time IS NOT NULL",
                     (day_s,),
                 ):
                     if conf is None or float(conf) < min_confidence:
                         continue
+                    if sci:
+                        uniq.add(str(sci))
                     dt = _parse_begin_time(bt).astimezone(tz)
                     h = dt.hour
                     for name, h0, h1 in parts:
@@ -171,7 +174,7 @@ def create_app() -> FastAPI:
                             buckets[name] += 1
                             break
 
-                row = {"date": day_s}
+                row = {"date": day_s, "unique_species": len(uniq)}
                 row.update(buckets)
                 rows_out.append(row)
                 cur_day += timedelta(days=1)
@@ -644,7 +647,7 @@ _INDEX_HTML = """<!doctype html>
 
     const parts = data.parts;
     const labels = data.rows.map(r => r.date);
-    const datasets = [
+    const barDatasets = [
       { key: parts[0], color: 'rgba(75, 192, 192, 0.65)' },
       { key: parts[1], color: 'rgba(255, 159, 64, 0.65)' },
       { key: parts[2], color: 'rgba(153, 102, 255, 0.65)' },
@@ -655,18 +658,30 @@ _INDEX_HTML = """<!doctype html>
       backgroundColor: color,
       borderWidth: 0,
       stack: 'stack1',
+      yAxisID: 'y',
     }));
+
+    const uniqDataset = {
+      label: 'Unique species/day',
+      data: data.rows.map(r => r.unique_species ?? 0),
+      type: 'line',
+      yAxisID: 'y1',
+      borderColor: 'rgba(0, 0, 0, 0.7)',
+      backgroundColor: 'rgba(0, 0, 0, 0.15)',
+      tension: 0.2,
+      pointRadius: 1,
+    };
 
     const ctx = document.getElementById('chart_dayparts');
     if (chartDayparts) chartDayparts.destroy();
     chartDayparts = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets },
+      data: { labels, datasets: [...barDatasets, uniqDataset] },
       options: {
         responsive: true,
         scales: {
           x: { stacked: true },
-          y: { stacked: true, beginAtZero: true }
+          y: { stacked: true, beginAtZero: true, position: 'left' },
+          y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
         }
       }
     });
