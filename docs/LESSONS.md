@@ -24,3 +24,9 @@
 ## 7) Private IP access
 - OpenClaw `web_fetch` blocks private/internal IPs (incl. Tailscale 100.x).
 - Use `exec` + curl/python to test Tailnet endpoints.
+
+## 8) Git workflow: commit vs push
+- Local commits are invisible to Dan’s other machines until pushed.
+- For user-visible changes (UI, endpoints, bugfixes), prefer **commit + push** immediately.
+- Always report: commit hash + whether it was pushed.
+- Treat `uv.lock` updates as part of “done” when deps change.
