@@ -285,6 +285,75 @@ def create_app() -> FastAPI:
             "rows": [{"hour": h, "detections": buckets[h]} for h in range(24)],
         }
 
+    @app.get("/api/topshare/daily")
+    def api_topshare_daily(
+        days: str = Query(default="30", description="Number of days back (e.g. 30) or 'all'"),
+        top_k: int = Query(default=3, ge=1, le=10),
+        tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    ):
+        tz_name_eff = tz_name.strip() or settings.tz_name
+        tz = ZoneInfo(tz_name_eff)
+        limit_days = _parse_days_param(days)
+
+        db = BirdnetDb(_resolve_birdnet_db_path())
+        with db.connect_ro() as con:
+            min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+            if not min_day or not max_day:
+                return {"tz": tz_name_eff, "rows": []}
+
+            end_day = date.fromisoformat(max_day)
+            if limit_days is None:
+                start_day = date.fromisoformat(min_day)
+            else:
+                start_day = end_day - timedelta(days=limit_days - 1)
+                min_possible = date.fromisoformat(min_day)
+                if start_day < min_possible:
+                    start_day = min_possible
+
+            rows_out: list[dict] = []
+            cur_day = start_day
+            while cur_day <= end_day:
+                day_s = cur_day.isoformat()
+
+                # Count detections by species for that day.
+                counts: dict[str, int] = {}
+                total = 0
+                for bt, conf, name in con.execute(
+                    """
+                    SELECT begin_time, confidence, common_name
+                    FROM notes
+                    WHERE date = ? AND begin_time IS NOT NULL
+                    """,
+                    (day_s,),
+                ):
+                    if conf is None or float(conf) < min_confidence:
+                        continue
+                    total += 1
+                    if name:
+                        counts[str(name)] = counts.get(str(name), 0) + 1
+
+                if total == 0:
+                    rows_out.append({"date": day_s, "total": 0, "top": [], "other": 0})
+                    cur_day += timedelta(days=1)
+                    continue
+
+                top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+                top_total = sum(c for _, c in top)
+                other = total - top_total
+                rows_out.append(
+                    {
+                        "date": day_s,
+                        "total": total,
+                        "top": [{"name": n, "count": c, "share": c / total} for (n, c) in top],
+                        "other": other,
+                        "other_share": other / total,
+                    }
+                )
+                cur_day += timedelta(days=1)
+
+        return {"tz": tz_name_eff, "min_confidence": min_confidence, "top_k": top_k, "rows": rows_out}
+
     @app.get("/api/wow")
     def api_wow(
         weeks: int = Query(default=8, ge=2, le=104),
@@ -468,6 +537,28 @@ _INDEX_HTML = """<!doctype html>
   </div>
 
   <div class=\"card\">
+    <h2 style=\"margin:0 0 8px 0\">Top-3 share (100% stacked)</h2>
+    <div class=\"row\">
+      <div>
+        <label for=\"topshare_days\">Days</label>
+        <input id=\"topshare_days\" type=\"number\" value=\"30\" min=\"1\" />
+      </div>
+      <div>
+        <button id=\"run_topshare\">Run</button>
+      </div>
+    </div>
+
+    <div style=\"margin-top: 16px\">
+      <canvas id=\"chart_topshare\"></canvas>
+    </div>
+
+    <details style=\"margin-top: 12px\">
+      <summary class=\"muted\">Raw JSON</summary>
+      <pre id=\"raw_topshare\"></pre>
+    </details>
+  </div>
+
+  <div class=\"card\">
     <h2 style=\"margin:0 0 8px 0\">Day parts (fixed: 00-06, 06-12, 12-18, 18-24)</h2>
     <div class=\"row\">
       <div>
@@ -525,15 +616,18 @@ _INDEX_HTML = """<!doctype html>
 
   const rawDawn = document.getElementById('raw_dawn');
   const rawWow = document.getElementById('raw_wow');
+  const rawTopshare = document.getElementById('raw_topshare');
   const rawDayparts = document.getElementById('raw_dayparts');
   const rawSpecies = document.getElementById('raw_species');
 
   const runBtn = document.getElementById('run');
   const runWowBtn = document.getElementById('run_wow');
+  const runTopshareBtn = document.getElementById('run_topshare');
   const runDaypartsBtn = document.getElementById('run_dayparts');
   const runSpeciesBtn = document.getElementById('run_species');
 
   const wowWeeks = document.getElementById('wow_weeks');
+  const topshareDays = document.getElementById('topshare_days');
   const daypartsDays = document.getElementById('dayparts_days');
   const speciesInput = document.getElementById('species');
   // days filter hidden for now; default to all
@@ -545,6 +639,7 @@ _INDEX_HTML = """<!doctype html>
 
   let chartDawn;
   let chartWow;
+  let chartTopshare;
   let chartDayparts;
   let chartSpecies;
 
@@ -630,6 +725,77 @@ _INDEX_HTML = """<!doctype html>
         scales: {
           y: { beginAtZero: true, position: 'left' },
           y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
+        }
+      }
+    });
+  }
+
+  async function runTopshare() {
+    const tz = tzInput.value;
+    const minConf = minConfInput.value;
+    const days = topshareDays.value;
+    const url = `/api/topshare/daily?days=${encodeURIComponent(days)}&top_k=3&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    rawTopshare.textContent = JSON.stringify(data, null, 2);
+
+    const labels = data.rows.map(r => r.date);
+
+    // Determine the union of top names across days (cap at a reasonable number)
+    const nameSet = new Set();
+    for (const row of data.rows) {
+      for (const t of (row.top || [])) nameSet.add(t.name);
+    }
+    const names = Array.from(nameSet);
+
+    function shareFor(row, name) {
+      for (const t of (row.top || [])) {
+        if (t.name === name) return t.share;
+      }
+      return 0;
+    }
+
+    const palette = [
+      'rgba(54, 162, 235, 0.65)',
+      'rgba(255, 99, 132, 0.65)',
+      'rgba(255, 159, 64, 0.65)',
+      'rgba(75, 192, 192, 0.65)',
+      'rgba(153, 102, 255, 0.65)',
+    ];
+
+    const datasets = names.map((name, i) => ({
+      label: name,
+      data: data.rows.map(r => shareFor(r, name) * 100.0),
+      backgroundColor: palette[i % palette.length],
+      borderWidth: 0,
+      stack: 'stack1',
+    }));
+
+    // Other
+    datasets.push({
+      label: 'Other',
+      data: data.rows.map(r => (r.other_share || 0) * 100.0),
+      backgroundColor: 'rgba(200, 200, 200, 0.7)',
+      borderWidth: 0,
+      stack: 'stack1',
+    });
+
+    const ctx = document.getElementById('chart_topshare');
+    if (chartTopshare) chartTopshare.destroy();
+    chartTopshare = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        scales: {
+          x: { stacked: true },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            max: 100,
+            ticks: { callback: (v) => v + '%' }
+          }
         }
       }
     });
@@ -769,6 +935,7 @@ _INDEX_HTML = """<!doctype html>
   async function refreshAll() {
     await runDawn();
     await runWow();
+    await runTopshare();
     await runDayparts();
     await runSpecies();
     setUpdated();
@@ -776,6 +943,7 @@ _INDEX_HTML = """<!doctype html>
 
   runBtn.addEventListener('click', async () => { await runDawn(); setUpdated(); });
   runWowBtn.addEventListener('click', async () => { await runWow(); setUpdated(); });
+  runTopshareBtn.addEventListener('click', async () => { await runTopshare(); setUpdated(); });
   runDaypartsBtn.addEventListener('click', async () => { await runDayparts(); setUpdated(); });
   runSpeciesBtn.addEventListener('click', async () => { await runSpecies(); setUpdated(); });
 
