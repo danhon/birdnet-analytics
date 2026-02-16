@@ -13,6 +13,7 @@ class Settings:
     port: int
     root_path: str
     tz_name: str
+    refresh_seconds: int
 
 
 def _getenv(name: str, default: str | None = None) -> str | None:
@@ -30,6 +31,7 @@ def load_settings() -> Settings:
     port = int(_getenv("BIRDNET_ANALYTICS_PORT", "8787") or "8787")
     root_path = _getenv("BIRDNET_ANALYTICS_ROOT_PATH", "") or ""
     tz_name = _getenv("BIRDNET_ANALYTICS_TZ", "America/Los_Angeles") or "America/Los_Angeles"
+    refresh_seconds = int(_getenv("BIRDNET_ANALYTICS_REFRESH_SECONDS", "30") or "30")
 
     return Settings(
         db_dir=Path(db_dir) if db_dir else None,
@@ -38,4 +40,5 @@ def load_settings() -> Settings:
         port=port,
         root_path=root_path,
         tz_name=tz_name,
+        refresh_seconds=refresh_seconds,
     )

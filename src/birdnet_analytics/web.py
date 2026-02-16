@@ -144,6 +144,42 @@ def create_app() -> FastAPI:
 
         return {"tz": tz_name_eff, "parts": [p[0] for p in _dayparts()], "rows": rows_out}
 
+    @app.get("/api/species/search")
+    def api_species_search(
+        q: str = Query(default="", description="Query substring"),
+        limit: int = Query(default=20, ge=1, le=200),
+    ):
+        q = (q or "").strip()
+        db = BirdnetDb(_resolve_birdnet_db_path())
+        with db.connect_ro() as con:
+            if q == "":
+                rows = con.execute(
+                    """
+                    SELECT common_name, COUNT(*) AS c
+                    FROM notes
+                    WHERE common_name IS NOT NULL AND common_name != ''
+                    GROUP BY common_name
+                    ORDER BY c DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                like = f"%{q}%"
+                rows = con.execute(
+                    """
+                    SELECT common_name, COUNT(*) AS c
+                    FROM notes
+                    WHERE common_name LIKE ?
+                    GROUP BY common_name
+                    ORDER BY c DESC
+                    LIMIT ?
+                    """,
+                    (like, limit),
+                ).fetchall()
+
+        return {"q": q, "limit": limit, "rows": [{"name": n, "count": c} for (n, c) in rows]}
+
     @app.get("/api/species/activity")
     def api_species_activity(
         name: str = Query(..., description="Common name (notes.common_name)"),
@@ -197,7 +233,8 @@ def create_app() -> FastAPI:
     def index():
         # Minimal single-file HTML (public-ish safe; does not show raw lat/lon)
         return HTMLResponse(
-            _INDEX_HTML.replace("__DEFAULT_TZ__", settings.tz_name),
+            _INDEX_HTML.replace("__DEFAULT_TZ__", settings.tz_name)
+            .replace("__REFRESH_SECONDS__", str(settings.refresh_seconds)),
             headers={"Cache-Control": "no-store"},
         )
 
@@ -226,7 +263,7 @@ _INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <h1>birdnet-analytics</h1>
-  <div class=\"muted\">BirdNET-GO analytics. v0.</div>
+  <div class=\"muted\">BirdNET-GO analytics. v0. Auto-refresh: <span id=\"refresh\">__REFRESH_SECONDS__</span>s. Last updated: <span id=\"updated\">—</span>.</div>
 
   <div class=\"card\">
     <h2 style=\"margin:0 0 8px 0\">Dawn chorus (detections/hour)</h2>
@@ -288,8 +325,9 @@ _INDEX_HTML = """<!doctype html>
     <h2 style=\"margin:0 0 8px 0\">Species activity (detections by hour of day)</h2>
     <div class=\"row\">
       <div style=\"min-width: 280px\">
-        <label for=\"species\">Common name (exact match)</label>
-        <input id=\"species\" type=\"text\" placeholder=\"Song Sparrow\" />
+        <label for=\"species\">Common name (search)</label>
+        <input id=\"species\" type=\"text\" placeholder=\"Song Sparrow\" list=\"species_list\" autocomplete=\"off\" />
+        <datalist id=\"species_list\"></datalist>
       </div>
       <div>
         <label for=\"species_days\">Days</label>
@@ -412,12 +450,33 @@ _INDEX_HTML = """<!doctype html>
     });
   }
 
+  let searchTimer;
+
+  async function updateSpeciesDatalist() {
+    const q = speciesInput.value.trim();
+    const url = `/api/species/search?q=${encodeURIComponent(q)}&limit=20`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const dl = document.getElementById('species_list');
+    dl.innerHTML = '';
+    for (const row of data.rows) {
+      const opt = document.createElement('option');
+      opt.value = row.name;
+      dl.appendChild(opt);
+    }
+  }
+
+  speciesInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(updateSpeciesDatalist, 200);
+  });
+
   async function runSpecies() {
     const tz = tzInput.value;
     const name = speciesInput.value.trim();
     const days = speciesDays.value.trim() || 'all';
     if (!name) {
-      alert('Enter a species common name (exact match from BirdNET-GO).');
+      alert('Enter a species common name.');
       return;
     }
 
@@ -453,12 +512,30 @@ _INDEX_HTML = """<!doctype html>
     });
   }
 
-  runBtn.addEventListener('click', runDawn);
-  runDaypartsBtn.addEventListener('click', runDayparts);
-  runSpeciesBtn.addEventListener('click', runSpecies);
+  function setUpdated() {
+    document.getElementById('updated').textContent = new Date().toLocaleString();
+  }
 
-  runDawn();
-  runDayparts();
+  async function refreshAll() {
+    await runDawn();
+    await runDayparts();
+    if (speciesInput.value.trim()) {
+      await runSpecies();
+    }
+    setUpdated();
+  }
+
+  runBtn.addEventListener('click', async () => { await runDawn(); setUpdated(); });
+  runDaypartsBtn.addEventListener('click', async () => { await runDayparts(); setUpdated(); });
+  runSpeciesBtn.addEventListener('click', async () => { await runSpecies(); setUpdated(); });
+
+  // Initial
+  updateSpeciesDatalist();
+  refreshAll();
+
+  // Auto-refresh
+  const REFRESH_SECONDS = parseInt(document.getElementById('refresh').textContent, 10) || 30;
+  setInterval(refreshAll, REFRESH_SECONDS * 1000);
 </script>
 </body>
 </html>"""
