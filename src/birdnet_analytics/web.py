@@ -222,16 +222,37 @@ def create_app() -> FastAPI:
 
         return {"q": q, "limit": limit, "rows": [{"name": n, "count": c} for (n, c) in rows]}
 
-    @app.get("/api/activity/hourly")
-    def api_activity_hourly(
+    def _hourly_buckets(*, con, tz: ZoneInfo, start_day: date, end_day: date, species: str, min_confidence: float):
+        buckets = {h: 0 for h in range(24)}
+        if species:
+            q = (
+                "SELECT begin_time, confidence FROM notes "
+                "WHERE common_name = ? AND date >= ? AND date <= ? AND begin_time IS NOT NULL"
+            )
+            params = (species, start_day.isoformat(), end_day.isoformat())
+        else:
+            q = (
+                "SELECT begin_time, confidence FROM notes "
+                "WHERE date >= ? AND date <= ? AND begin_time IS NOT NULL"
+            )
+            params = (start_day.isoformat(), end_day.isoformat())
+
+        for (bt, conf) in con.execute(q, params):
+            if conf is None or float(conf) < min_confidence:
+                continue
+            dt = _parse_begin_time(bt).astimezone(tz)
+            buckets[dt.hour] += 1
+        return buckets
+
+    @app.get("/api/activity/hourly_compare")
+    def api_activity_hourly_compare(
         species: str = Query(default="", description="Optional common name filter"),
-        days: str = Query(default="all", description="Number of days back (e.g. 30) or 'all'"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
+        """Return hourly histogram for all-time plus today (latest date in DB)."""
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
-        limit_days = _parse_days_param(days)
         species = (species or "").strip()
 
         db = BirdnetDb(_resolve_birdnet_db_path())
@@ -244,45 +265,37 @@ def create_app() -> FastAPI:
                 min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
 
             if not min_day or not max_day:
-                return {"species": species or None, "tz": tz_name_eff, "rows": []}
+                return {"species": species or None, "tz": tz_name_eff, "rows_all": [], "rows_today": []}
 
+            start_day = date.fromisoformat(min_day)
             end_day = date.fromisoformat(max_day)
-            if limit_days is None:
-                start_day = date.fromisoformat(min_day)
-            else:
-                start_day = end_day - timedelta(days=limit_days - 1)
-                min_possible = date.fromisoformat(min_day)
-                if start_day < min_possible:
-                    start_day = min_possible
+            today_day = end_day
 
-            buckets = {h: 0 for h in range(24)}
-
-            if species:
-                q = (
-                    "SELECT begin_time, confidence FROM notes "
-                    "WHERE common_name = ? AND date >= ? AND date <= ? AND begin_time IS NOT NULL"
-                )
-                params = (species, start_day.isoformat(), end_day.isoformat())
-            else:
-                q = (
-                    "SELECT begin_time, confidence FROM notes "
-                    "WHERE date >= ? AND date <= ? AND begin_time IS NOT NULL"
-                )
-                params = (start_day.isoformat(), end_day.isoformat())
-
-            for (bt, conf) in con.execute(q, params):
-                if conf is None or float(conf) < min_confidence:
-                    continue
-                dt = _parse_begin_time(bt).astimezone(tz)
-                buckets[dt.hour] += 1
+            buckets_all = _hourly_buckets(
+                con=con,
+                tz=tz,
+                start_day=start_day,
+                end_day=end_day,
+                species=species,
+                min_confidence=min_confidence,
+            )
+            buckets_today = _hourly_buckets(
+                con=con,
+                tz=tz,
+                start_day=today_day,
+                end_day=today_day,
+                species=species,
+                min_confidence=min_confidence,
+            )
 
         return {
             "species": species or None,
             "tz": tz_name_eff,
             "min_confidence": min_confidence,
-            "start": start_day.isoformat(),
-            "end": end_day.isoformat(),
-            "rows": [{"hour": h, "detections": buckets[h]} for h in range(24)],
+            "all": {"start": start_day.isoformat(), "end": end_day.isoformat()},
+            "today": {"date": today_day.isoformat()},
+            "rows_all": [{"hour": h, "detections": buckets_all[h]} for h in range(24)],
+            "rows_today": [{"hour": h, "detections": buckets_today[h]} for h in range(24)],
         }
 
     @app.get("/api/topshare/daily")
@@ -742,58 +755,47 @@ _INDEX_HTML = """<!doctype html>
 
     const labels = data.rows.map(r => r.date);
 
-    // Pick the top K species across the whole period (by summed counts) so the stack order is stable.
-    const totals = new Map();
-    for (const row of data.rows) {
-      for (const t of (row.top || [])) {
-        totals.set(t.name, (totals.get(t.name) || 0) + (t.count || 0));
-      }
-    }
-    const names = Array.from(totals.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, _]) => name);
+    // We want top-3 for THAT DAY. Use rank buckets (Top1/Top2/Top3),
+    // and show the actual species name in the tooltip.
+    const top1Share = data.rows.map(r => (r.top?.[0]?.share || 0) * 100.0);
+    const top2Share = data.rows.map(r => (r.top?.[1]?.share || 0) * 100.0);
+    const top3Share = data.rows.map(r => (r.top?.[2]?.share || 0) * 100.0);
+    const otherShare = data.rows.map(r => (r.other_share || 0) * 100.0);
 
-    function shareFor(row, name) {
-      for (const t of (row.top || [])) {
-        if (t.name === name) return t.share;
-      }
-      return 0;
-    }
+    const top1Name = data.rows.map(r => (r.top?.[0]?.name || '—'));
+    const top2Name = data.rows.map(r => (r.top?.[1]?.name || '—'));
+    const top3Name = data.rows.map(r => (r.top?.[2]?.name || '—'));
 
-    const palette = [
-      'rgba(54, 162, 235, 0.65)',
-      'rgba(255, 99, 132, 0.65)',
-      'rgba(255, 159, 64, 0.65)',
-      'rgba(75, 192, 192, 0.65)',
-      'rgba(153, 102, 255, 0.65)',
-    ];
-
-    // Dataset order controls stack order (bottom -> top).
-    // Requirement: Other on bottom, then top-3 ascending, so the most common is on top.
-    const datasets = [];
-
-    // Other (always bottom)
-    datasets.push({
-      label: 'Other',
-      data: data.rows.map(r => (r.other_share || 0) * 100.0),
-      backgroundColor: 'rgba(200, 200, 200, 0.7)',
-      borderWidth: 0,
-      stack: 'stack1',
-    });
-
-    // Add #3 then #2 then #1 so #1 ends up on top.
-    const ordered = [...names].reverse();
-    ordered.forEach((name, i) => {
-      const color = palette[i % palette.length];
-      datasets.push({
-        label: name,
-        data: data.rows.map(r => shareFor(r, name) * 100.0),
-        backgroundColor: color,
+    const datasets = [
+      {
+        label: 'Other',
+        data: otherShare,
+        backgroundColor: 'rgba(200, 200, 200, 0.75)',
         borderWidth: 0,
         stack: 'stack1',
-      });
-    });
+      },
+      {
+        label: 'Top 3',
+        data: top3Share,
+        backgroundColor: 'rgba(255, 159, 64, 0.65)',
+        borderWidth: 0,
+        stack: 'stack1',
+      },
+      {
+        label: 'Top 2',
+        data: top2Share,
+        backgroundColor: 'rgba(255, 99, 132, 0.65)',
+        borderWidth: 0,
+        stack: 'stack1',
+      },
+      {
+        label: 'Top 1',
+        data: top1Share,
+        backgroundColor: 'rgba(54, 162, 235, 0.65)',
+        borderWidth: 0,
+        stack: 'stack1',
+      },
+    ];
 
     const ctx = document.getElementById('chart_topshare');
     if (chartTopshare) chartTopshare.destroy();
@@ -802,6 +804,21 @@ _INDEX_HTML = """<!doctype html>
       data: { labels, datasets },
       options: {
         responsive: true,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const i = context.dataIndex;
+                const lbl = context.dataset.label;
+                const val = context.parsed.y;
+                if (lbl === 'Top 1') return `Top 1: ${top1Name[i]} (${val.toFixed(1)}%)`;
+                if (lbl === 'Top 2') return `Top 2: ${top2Name[i]} (${val.toFixed(1)}%)`;
+                if (lbl === 'Top 3') return `Top 3: ${top3Name[i]} (${val.toFixed(1)}%)`;
+                return `Other (${val.toFixed(1)}%)`;
+              }
+            }
+          }
+        },
         scales: {
           x: { stacked: true },
           y: {
@@ -908,30 +925,42 @@ _INDEX_HTML = """<!doctype html>
     const tz = tzInput.value;
     const minConf = minConfInput.value;
     const species = speciesInput.value.trim();
-    const days = speciesDays.value.trim() || 'all';
 
-    const url = `/api/activity/hourly?species=${encodeURIComponent(species)}&days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const url = `/api/activity/hourly_compare?species=${encodeURIComponent(species)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
     rawSpecies.textContent = JSON.stringify(data, null, 2);
 
-    const labels = data.rows.map(r => String(r.hour).padStart(2,'0') + ':00');
-    const values = data.rows.map(r => r.detections);
+    const labels = data.rows_all.map(r => String(r.hour).padStart(2,'0') + ':00');
+    const valuesAll = data.rows_all.map(r => r.detections);
+    const valuesToday = data.rows_today.map(r => r.detections);
 
     const ctx = document.getElementById('chart_species');
     if (chartSpecies) chartSpecies.destroy();
     chartSpecies = new Chart(ctx, {
-      type: 'bar',
       data: {
         labels,
-        datasets: [{
-          label: data.species ? `Detections (${data.species})` : 'Detections (all species)',
-          data: values,
-          backgroundColor: 'rgba(99, 102, 241, 0.6)',
-          borderColor: 'rgba(99, 102, 241, 1)',
-          borderWidth: 1,
-        }]
+        datasets: [
+          {
+            type: 'bar',
+            label: data.species ? `All-time (${data.species})` : 'All-time (all species)',
+            data: valuesAll,
+            backgroundColor: 'rgba(99, 102, 241, 0.35)',
+            borderWidth: 0,
+            yAxisID: 'y',
+          },
+          {
+            type: 'line',
+            label: `Today (${data.today.date})`,
+            data: valuesToday,
+            borderColor: 'rgba(0, 0, 0, 0.8)',
+            backgroundColor: 'rgba(0, 0, 0, 0.1)',
+            tension: 0.2,
+            pointRadius: 1,
+            yAxisID: 'y',
+          }
+        ]
       },
       options: {
         responsive: true,
