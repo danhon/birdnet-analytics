@@ -678,7 +678,6 @@ _INDEX_HTML = """<!doctype html>
 
   <div class=\"card\">
     <h2 style=\"margin:0 0 8px 0\">Day parts (fixed: 00-06, 06-12, 12-18, 18-24) + precip (mm)</h2>
-    <div class=\"muted\" style=\"margin: 4px 0 8px 0\">Precip is also listed in a table below for readability.</div>
     <div class=\"row\">
       <div>
         <label for=\"dayparts_days\">Days</label>
@@ -691,11 +690,6 @@ _INDEX_HTML = """<!doctype html>
 
     <div style=\"margin-top: 16px\">
       <canvas id=\"chart_dayparts\"></canvas>
-    </div>
-
-    <div style=\"margin-top: 12px\">
-      <div class=\"muted\" style=\"margin-bottom: 6px\">Daily precipitation (mm)</div>
-      <div id=\"precip_table\" style=\"font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; line-height: 1.5; white-space: pre; background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 10px; overflow-x: auto;\">(loading...)\n</div>
     </div>
 
     <details style=\"margin-top: 12px\">
@@ -953,10 +947,6 @@ _INDEX_HTML = """<!doctype html>
     const data = await resp.json();
 
     rawDayparts.textContent = JSON.stringify(data, null, 2);
-
-    // Render precip table (aligned with dates)
-    const lines = data.rows.map(r => `${r.date}  ${Number(r.precip_mm ?? 0).toFixed(1)} mm`);
-    document.getElementById('precip_table').textContent = lines.join('\n');
 
     const parts = data.parts;
     const labels = data.rows.map(r => r.date);
