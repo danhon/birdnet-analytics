@@ -1157,6 +1157,36 @@ _INDEX_HTML = """<!doctype html>
       yAxisID: 'y',
     });
 
+    const nowHour = (new Date()).getHours();
+
+    const playheadPlugin = {
+      id: 'playhead',
+      afterDraw(chart, args, opts) {
+        const {ctx, chartArea, scales} = chart;
+        if (!chartArea) return;
+        const xScale = scales.x;
+        if (!xScale) return;
+
+        // Labels are 'HH:00'
+        const label = String(nowHour).padStart(2,'0') + ':00';
+        const x = xScale.getPixelForValue(label);
+        if (!isFinite(x)) return;
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.9)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, chartArea.top);
+        ctx.lineTo(x, chartArea.bottom);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.9)';
+        ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+        ctx.fillText('now', x + 4, chartArea.top + 12);
+        ctx.restore();
+      }
+    };
+
     chartSpecies = new Chart(ctx, {
       data: { labels, datasets },
       options: {
@@ -1165,7 +1195,8 @@ _INDEX_HTML = """<!doctype html>
           y: { beginAtZero: true, position: 'left' },
           y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, suggestedMax: 100 },
         }
-      }
+      },
+      plugins: [playheadPlugin],
     });
   }
 
