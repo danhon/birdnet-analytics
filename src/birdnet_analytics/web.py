@@ -36,16 +36,31 @@ def _parse_begin_time(s: str) -> datetime:
 
 
 def _dawn_hourly_for_day(
-    *, con, day: str, tz: ZoneInfo, before_min: int, after_min: int
+    *,
+    con,
+    day: str,
+    tz: ZoneInfo,
+    before_min: int,
+    after_min: int,
+    min_confidence: float,
 ) -> list[dict]:
     lat, lon = guess_lat_lon(con)
-    sun_times = compute_sun_times(on_date=date.fromisoformat(day), latitude=lat, longitude=lon, tz_name=str(tz.key))
-    start, end = dawn_window(sunrise=sun_times.sunrise, before=timedelta(minutes=before_min), after=timedelta(minutes=after_min))
+    sun_times = compute_sun_times(
+        on_date=date.fromisoformat(day), latitude=lat, longitude=lon, tz_name=str(tz.key)
+    )
+    start, end = dawn_window(
+        sunrise=sun_times.sunrise,
+        before=timedelta(minutes=before_min),
+        after=timedelta(minutes=after_min),
+    )
 
     buckets: dict[int, int] = {}
-    for (bt,) in con.execute(
-        "SELECT begin_time FROM notes WHERE date = ? AND begin_time IS NOT NULL", (day,)
+    for (bt, conf) in con.execute(
+        "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+        (day,),
     ):
+        if conf is None or float(conf) < min_confidence:
+            continue
         dt = _parse_begin_time(bt).astimezone(tz)
         if start <= dt < end:
             buckets[dt.hour] = buckets.get(dt.hour, 0) + 1
@@ -84,19 +99,35 @@ def create_app() -> FastAPI:
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         before_min: int = 90,
         after_min: int = 150,
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
         db_path = _resolve_birdnet_db_path()
         db = BirdnetDb(db_path)
         with db.connect_ro() as con:
-            rows = _dawn_hourly_for_day(con=con, day=day, tz=tz, before_min=before_min, after_min=after_min)
-        return {"date": day, "tz": tz_name_eff, "before_min": before_min, "after_min": after_min, "rows": rows}
+            rows = _dawn_hourly_for_day(
+                con=con,
+                day=day,
+                tz=tz,
+                before_min=before_min,
+                after_min=after_min,
+                min_confidence=min_confidence,
+            )
+        return {
+            "date": day,
+            "tz": tz_name_eff,
+            "before_min": before_min,
+            "after_min": after_min,
+            "min_confidence": min_confidence,
+            "rows": rows,
+        }
 
     @app.get("/api/dayparts/daily")
     def api_dayparts_daily(
         days: str = Query(default="30", description="Number of days back (e.g. 30) or 'all'"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
@@ -127,9 +158,12 @@ def create_app() -> FastAPI:
                 day_s = cur_day.isoformat()
                 buckets = {name: 0 for (name, _, _) in parts}
 
-                for (bt,) in con.execute(
-                    "SELECT begin_time FROM notes WHERE date = ? AND begin_time IS NOT NULL", (day_s,)
+                for (bt, conf) in con.execute(
+                    "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+                    (day_s,),
                 ):
+                    if conf is None or float(conf) < min_confidence:
+                        continue
                     dt = _parse_begin_time(bt).astimezone(tz)
                     h = dt.hour
                     for name, h0, h1 in parts:
@@ -142,7 +176,12 @@ def create_app() -> FastAPI:
                 rows_out.append(row)
                 cur_day += timedelta(days=1)
 
-        return {"tz": tz_name_eff, "parts": [p[0] for p in _dayparts()], "rows": rows_out}
+        return {
+            "tz": tz_name_eff,
+            "min_confidence": min_confidence,
+            "parts": [p[0] for p in _dayparts()],
+            "rows": rows_out,
+        }
 
     @app.get("/api/species/search")
     def api_species_search(
@@ -185,6 +224,7 @@ def create_app() -> FastAPI:
         name: str = Query(..., description="Common name (notes.common_name)"),
         days: str = Query(default="all", description="Number of days back (e.g. 30) or 'all'"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
@@ -209,25 +249,97 @@ def create_app() -> FastAPI:
 
             buckets = {h: 0 for h in range(24)}
 
-            for (bt,) in con.execute(
+            for (bt, conf) in con.execute(
                 """
-                SELECT begin_time FROM notes
+                SELECT begin_time, confidence FROM notes
                 WHERE common_name = ?
                   AND date >= ? AND date <= ?
                   AND begin_time IS NOT NULL
                 """,
                 (name, start_day.isoformat(), end_day.isoformat()),
             ):
+                if conf is None or float(conf) < min_confidence:
+                    continue
                 dt = _parse_begin_time(bt).astimezone(tz)
                 buckets[dt.hour] += 1
 
         return {
             "name": name,
             "tz": tz_name_eff,
+            "min_confidence": min_confidence,
             "start": start_day.isoformat(),
             "end": end_day.isoformat(),
             "rows": [{"hour": h, "detections": buckets[h]} for h in range(24)],
         }
+
+    @app.get("/api/wow")
+    def api_wow(
+        weeks: int = Query(default=8, ge=2, le=104),
+        tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    ):
+        tz_name_eff = tz_name.strip() or settings.tz_name
+        tz = ZoneInfo(tz_name_eff)
+
+        db = BirdnetDb(_resolve_birdnet_db_path())
+        with db.connect_ro() as con:
+            # Find latest begin_time (to anchor the current week)
+            row = con.execute(
+                "SELECT begin_time FROM notes WHERE begin_time IS NOT NULL ORDER BY begin_time DESC LIMIT 1"
+            ).fetchone()
+            if not row:
+                return {"tz": tz_name_eff, "rows": []}
+
+            latest = _parse_begin_time(row[0]).astimezone(tz)
+            latest_date = latest.date()
+            end_week_start = latest_date - timedelta(days=latest_date.weekday())  # Monday
+            start_week_start = end_week_start - timedelta(days=(weeks - 1) * 7)
+            start_date = start_week_start
+            end_date = end_week_start + timedelta(days=6)
+
+            # Prepare buckets
+            buckets: dict[str, dict] = {}
+            week = start_week_start
+            while week <= end_week_start:
+                k = week.isoformat()
+                buckets[k] = {"week_start": k, "detections": 0, "species": set()}
+                week += timedelta(days=7)
+
+            # Coarse filter by notes.date (assumed local date). Then parse begin_time to get local week.
+            for bt, conf, sci in con.execute(
+                """
+                SELECT begin_time, confidence, scientific_name
+                FROM notes
+                WHERE begin_time IS NOT NULL
+                  AND date >= ? AND date <= ?
+                """,
+                (start_date.isoformat(), end_date.isoformat()),
+            ):
+                if conf is None or float(conf) < min_confidence:
+                    continue
+                dt = _parse_begin_time(bt).astimezone(tz)
+                d = dt.date()
+                wk = d - timedelta(days=d.weekday())
+                wk_key = wk.isoformat()
+                b = buckets.get(wk_key)
+                if b is None:
+                    continue
+                b["detections"] += 1
+                if sci:
+                    b["species"].add(sci)
+
+            rows = []
+            for k in sorted(buckets.keys()):
+                b = buckets[k]
+                rows.append(
+                    {
+                        "week_start": b["week_start"],
+                        "detections": b["detections"],
+                        "unique_species": len(b["species"]),
+                    }
+                )
+
+        return {"tz": tz_name_eff, "min_confidence": min_confidence, "rows": rows}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -266,15 +378,29 @@ _INDEX_HTML = """<!doctype html>
   <div class=\"muted\">BirdNET-GO analytics. v0. Auto-refresh: <span id=\"refresh\">__REFRESH_SECONDS__</span>s. Last updated: <span id=\"updated\">—</span>.</div>
 
   <div class=\"card\">
+    <h2 style=\"margin:0 0 8px 0\">Controls</h2>
+    <div class=\"row\">
+      <div>
+        <label for=\"tz\">Timezone</label>
+        <input id=\"tz\" type=\"text\" value=\"__DEFAULT_TZ__\" />
+      </div>
+      <div>
+        <label for=\"min_conf\">Min confidence</label>
+        <input id=\"min_conf\" type=\"number\" value=\"0.0\" min=\"0\" max=\"1\" step=\"0.01\" />
+      </div>
+      <div>
+        <label for=\"top_n\">Top N</label>
+        <input id=\"top_n\" type=\"number\" value=\"10\" min=\"1\" max=\"50\" />
+      </div>
+    </div>
+  </div>
+
+  <div class=\"card\">
     <h2 style=\"margin:0 0 8px 0\">Dawn chorus (detections/hour)</h2>
     <div class=\"row\">
       <div>
         <label for=\"day\">Date</label>
         <input id=\"day\" type=\"date\" />
-      </div>
-      <div>
-        <label for=\"tz\">Timezone</label>
-        <input id=\"tz\" type=\"text\" value=\"__DEFAULT_TZ__\" />
       </div>
       <div>
         <label for=\"before\">Minutes before sunrise</label>
@@ -296,6 +422,28 @@ _INDEX_HTML = """<!doctype html>
     <details style=\"margin-top: 12px\">
       <summary class=\"muted\">Raw JSON</summary>
       <pre id=\"raw_dawn\"></pre>
+    </details>
+  </div>
+
+  <div class=\"card\">
+    <h2 style=\"margin:0 0 8px 0\">Week over week (total detections + unique species)</h2>
+    <div class=\"row\">
+      <div>
+        <label for=\"wow_weeks\">Weeks</label>
+        <input id=\"wow_weeks\" type=\"number\" value=\"8\" min=\"2\" max=\"104\" />
+      </div>
+      <div>
+        <button id=\"run_wow\">Run</button>
+      </div>
+    </div>
+
+    <div style=\"margin-top: 16px\">
+      <canvas id=\"chart_wow\"></canvas>
+    </div>
+
+    <details style=\"margin-top: 12px\">
+      <summary class=\"muted\">Raw JSON</summary>
+      <pre id=\"raw_wow\"></pre>
     </details>
   </div>
 
@@ -351,16 +499,23 @@ _INDEX_HTML = """<!doctype html>
 <script>
   const dayInput = document.getElementById('day');
   const tzInput = document.getElementById('tz');
+  const minConfInput = document.getElementById('min_conf');
+  const topNInput = document.getElementById('top_n');
+
   const beforeInput = document.getElementById('before');
   const afterInput = document.getElementById('after');
+
   const rawDawn = document.getElementById('raw_dawn');
+  const rawWow = document.getElementById('raw_wow');
   const rawDayparts = document.getElementById('raw_dayparts');
   const rawSpecies = document.getElementById('raw_species');
 
   const runBtn = document.getElementById('run');
+  const runWowBtn = document.getElementById('run_wow');
   const runDaypartsBtn = document.getElementById('run_dayparts');
   const runSpeciesBtn = document.getElementById('run_species');
 
+  const wowWeeks = document.getElementById('wow_weeks');
   const daypartsDays = document.getElementById('dayparts_days');
   const speciesInput = document.getElementById('species');
   const speciesDays = document.getElementById('species_days');
@@ -370,16 +525,18 @@ _INDEX_HTML = """<!doctype html>
   dayInput.value = today.toISOString().slice(0,10);
 
   let chartDawn;
+  let chartWow;
   let chartDayparts;
   let chartSpecies;
 
   async function runDawn() {
     const day = dayInput.value;
     const tz = tzInput.value;
+    const minConf = minConfInput.value;
     const before = beforeInput.value;
     const after = afterInput.value;
 
-    const url = `/api/dawn/hourly?day=${encodeURIComponent(day)}&tz_name=${encodeURIComponent(tz)}&before_min=${encodeURIComponent(before)}&after_min=${encodeURIComponent(after)}`;
+    const url = `/api/dawn/hourly?day=${encodeURIComponent(day)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}&before_min=${encodeURIComponent(before)}&after_min=${encodeURIComponent(after)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -411,10 +568,59 @@ _INDEX_HTML = """<!doctype html>
     });
   }
 
+  async function runWow() {
+    const tz = tzInput.value;
+    const minConf = minConfInput.value;
+    const weeks = wowWeeks.value;
+    const url = `/api/wow?weeks=${encodeURIComponent(weeks)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    rawWow.textContent = JSON.stringify(data, null, 2);
+
+    const labels = data.rows.map(r => r.week_start);
+    const det = data.rows.map(r => r.detections);
+    const uniq = data.rows.map(r => r.unique_species);
+
+    const ctx = document.getElementById('chart_wow');
+    if (chartWow) chartWow.destroy();
+    chartWow = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Detections',
+            data: det,
+            backgroundColor: 'rgba(54, 162, 235, 0.6)',
+            yAxisID: 'y',
+          },
+          {
+            label: 'Unique species',
+            data: uniq,
+            type: 'line',
+            borderColor: 'rgba(255, 99, 132, 1)',
+            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+            yAxisID: 'y1',
+            tension: 0.2,
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: true, position: 'left' },
+          y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
+        }
+      }
+    });
+  }
+
   async function runDayparts() {
     const tz = tzInput.value;
+    const minConf = minConfInput.value;
     const days = daypartsDays.value;
-    const url = `/api/dayparts/daily?days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}`;
+    const url = `/api/dayparts/daily?days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -473,6 +679,7 @@ _INDEX_HTML = """<!doctype html>
 
   async function runSpecies() {
     const tz = tzInput.value;
+    const minConf = minConfInput.value;
     const name = speciesInput.value.trim();
     const days = speciesDays.value.trim() || 'all';
     if (!name) {
@@ -480,7 +687,7 @@ _INDEX_HTML = """<!doctype html>
       return;
     }
 
-    const url = `/api/species/activity?name=${encodeURIComponent(name)}&days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}`;
+    const url = `/api/species/activity?name=${encodeURIComponent(name)}&days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -518,6 +725,7 @@ _INDEX_HTML = """<!doctype html>
 
   async function refreshAll() {
     await runDawn();
+    await runWow();
     await runDayparts();
     if (speciesInput.value.trim()) {
       await runSpecies();
@@ -526,8 +734,14 @@ _INDEX_HTML = """<!doctype html>
   }
 
   runBtn.addEventListener('click', async () => { await runDawn(); setUpdated(); });
+  runWowBtn.addEventListener('click', async () => { await runWow(); setUpdated(); });
   runDaypartsBtn.addEventListener('click', async () => { await runDayparts(); setUpdated(); });
   runSpeciesBtn.addEventListener('click', async () => { await runSpecies(); setUpdated(); });
+
+  // Recompute on control changes
+  for (const el of [tzInput, minConfInput, topNInput]) {
+    el.addEventListener('change', refreshAll);
+  }
 
   // Initial
   updateSpeciesDatalist();
