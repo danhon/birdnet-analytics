@@ -12,6 +12,7 @@ class Settings:
     host: str
     port: int
     root_path: str
+    tz_name: str
 
 
 def _getenv(name: str, default: str | None = None) -> str | None:
@@ -28,6 +29,7 @@ def load_settings() -> Settings:
     host = _getenv("BIRDNET_ANALYTICS_HOST", "127.0.0.1") or "127.0.0.1"
     port = int(_getenv("BIRDNET_ANALYTICS_PORT", "8787") or "8787")
     root_path = _getenv("BIRDNET_ANALYTICS_ROOT_PATH", "") or ""
+    tz_name = _getenv("BIRDNET_ANALYTICS_TZ", "America/Los_Angeles") or "America/Los_Angeles"
 
     return Settings(
         db_dir=Path(db_dir) if db_dir else None,
@@ -35,4 +37,5 @@ def load_settings() -> Settings:
         host=host,
         port=port,
         root_path=root_path,
+        tz_name=tz_name,
     )

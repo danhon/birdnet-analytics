@@ -27,6 +27,14 @@ Run a script:
 uv run python scripts/print_schema.py /path/to/birdnet.db
 ```
 
+Run the web dashboard locally:
+```sh
+export BIRDNET_DB_PATH=_data/sample/birdnet.db
+export BIRDNET_ANALYTICS_TZ=America/Los_Angeles
+uv run uvicorn birdnet_analytics.web:app --reload --port 8787
+```
+Then open: <http://127.0.0.1:8787/>
+
 ## Next steps
 1. Confirm BirdNET-GO SQLite DB path on **UBUNTUPLEX**.
 2. Capture schema (`.tables`, `.schema`).
