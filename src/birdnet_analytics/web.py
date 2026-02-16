@@ -675,6 +675,7 @@ _INDEX_HTML = """<!doctype html>
     const ctx = document.getElementById('chart_dayparts');
     if (chartDayparts) chartDayparts.destroy();
     chartDayparts = new Chart(ctx, {
+      type: 'bar',
       data: { labels, datasets: [...barDatasets, uniqDataset] },
       options: {
         responsive: true,
