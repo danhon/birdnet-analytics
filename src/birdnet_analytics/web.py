@@ -695,7 +695,19 @@ _INDEX_HTML = """<!doctype html>
 
   speciesInput.addEventListener('input', () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(updateSpeciesDatalist, 200);
+    searchTimer = setTimeout(async () => {
+      await updateSpeciesDatalist();
+      // Also update the chart as the species changes.
+      // (Debounced to avoid hammering the DB while typing.)
+      await runSpecies();
+      setUpdated();
+    }, 250);
+  });
+
+  // When user picks a datalist option, 'change' fires.
+  speciesInput.addEventListener('change', async () => {
+    await runSpecies();
+    setUpdated();
   });
 
   async function runSpecies() {
