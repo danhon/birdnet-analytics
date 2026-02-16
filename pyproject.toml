@@ -1,0 +1,21 @@
+[project]
+name = "birdnet-analytics"
+version = "0.1.0"
+description = "Analytics + reporting for BirdNET-GO"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Dan Hon" }]
+dependencies = [
+  "pandas>=2.2",
+  "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6",
+  "pytest>=8.0",
+]
+
+[tool.ruff]
+line-length = 100
