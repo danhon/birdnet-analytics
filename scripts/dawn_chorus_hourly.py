@@ -78,21 +78,30 @@ def main() -> None:
 
             start, end = dawn_window(sunrise=sunrise_dt, before=before, after=after)
 
-            # begin_time is stored as ISO-ish string with offset. SQLite can compare strings if normalized,
-            # but safest is to use datetime() to parse.
-            rows = con.execute(
-                """
-                SELECT strftime('%H', datetime(begin_time)) AS hour, COUNT(*)
-                FROM notes
-                WHERE datetime(begin_time) >= datetime(?) AND datetime(begin_time) < datetime(?)
-                GROUP BY hour
-                ORDER BY hour
-                """,
-                (start.isoformat(), end.isoformat()),
-            ).fetchall()
+            # SQLite's datetime()/strftime() handling of offsets is inconsistent.
+            # Do timestamp parsing + tz conversion in Python for correctness.
+            from zoneinfo import ZoneInfo
+            import re
 
-            for hour, c in rows:
-                print(f"{day}\t{int(hour):02d}\t{c}")
+            tz = ZoneInfo(args.tz)
+
+            def parse_begin_time(s: str) -> datetime:
+                # Example in this DB: '2026-02-16 09:33:43.731828028-08:00'
+                s = s.replace(" ", "T", 1)
+                # Truncate fractional seconds to microseconds (datetime only supports 6 digits)
+                s = re.sub(r"\.(\d{6})\d+", r".\1", s)
+                return datetime.fromisoformat(s)
+
+            buckets: dict[int, int] = {}
+            for (bt,) in con.execute(
+                "SELECT begin_time FROM notes WHERE date = ? AND begin_time IS NOT NULL", (day,)
+            ):
+                dt = parse_begin_time(bt).astimezone(tz)
+                if start <= dt < end:
+                    buckets[dt.hour] = buckets.get(dt.hour, 0) + 1
+
+            for hour in sorted(buckets):
+                print(f"{day}\t{hour:02d}\t{buckets[hour]}")
 
 
 if __name__ == "__main__":
