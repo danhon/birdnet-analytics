@@ -249,6 +249,7 @@ def create_app() -> FastAPI:
         species: str = Query(default="", description="Optional common name filter"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+        mode: str = Query(default="pct", description="pct|minmax"),
     ):
         """Hourly activity stats across days: min/max/mean per hour + today's per-hour counts.
 
@@ -275,15 +276,16 @@ def create_app() -> FastAPI:
             end_day = date.fromisoformat(max_day)
             today_day = end_day
 
-            # Stats accumulators: per hour, keep min/max/sum and number of days.
+            # Per-hour list of daily counts so we can compute percentiles.
+            values_by_hour: dict[int, list[int]] = {h: [] for h in range(24)}
             mins = {h: None for h in range(24)}
             maxs = {h: 0 for h in range(24)}
             sums = {h: 0 for h in range(24)}
+            nonzero_days = {h: 0 for h in range(24)}
             day_count = 0
 
             cur = start_day
             while cur <= end_day:
-                day_s = cur.isoformat()
                 buckets = _hourly_buckets(
                     con=con,
                     tz=tz,
@@ -294,12 +296,15 @@ def create_app() -> FastAPI:
                 )
                 day_count += 1
                 for h in range(24):
-                    v = buckets[h]
+                    v = int(buckets[h])
+                    values_by_hour[h].append(v)
                     if mins[h] is None or v < mins[h]:
                         mins[h] = v
                     if v > maxs[h]:
                         maxs[h] = v
                     sums[h] += v
+                    if v > 0:
+                        nonzero_days[h] += 1
                 cur += timedelta(days=1)
 
             today_buckets = _hourly_buckets(
@@ -311,23 +316,48 @@ def create_app() -> FastAPI:
                 min_confidence=min_confidence,
             )
 
+        def percentile(sorted_vals: list[int], p: float) -> float:
+            if not sorted_vals:
+                return 0.0
+            # nearest-rank
+            k = int(round((p / 100.0) * (len(sorted_vals) - 1)))
+            k = max(0, min(len(sorted_vals) - 1, k))
+            return float(sorted_vals[k])
+
         rows = []
         for h in range(24):
             mean = (sums[h] / day_count) if day_count else 0.0
+            vals = sorted(values_by_hour[h])
+            p10 = percentile(vals, 10)
+            p50 = percentile(vals, 50)
+            p90 = percentile(vals, 90)
+            active_rate = (nonzero_days[h] / day_count) if day_count else 0.0
             rows.append(
                 {
                     "hour": h,
+                    # keep min/max for rollback
                     "min": int(mins[h] or 0),
                     "max": int(maxs[h]),
                     "mean": float(mean),
+                    # new percentiles
+                    "p10": p10,
+                    "p50": p50,
+                    "p90": p90,
+                    "active_rate": active_rate,
+                    # today
                     "today": int(today_buckets[h]),
                 }
             )
+
+        mode_eff = (mode or "pct").strip().lower()
+        if mode_eff not in ("pct", "minmax"):
+            mode_eff = "pct"
 
         return {
             "species": species or None,
             "tz": tz_name_eff,
             "min_confidence": min_confidence,
+            "mode": mode_eff,
             "all": {"start": start_day.isoformat(), "end": end_day.isoformat(), "days": day_count},
             "today": {"date": today_day.isoformat()},
             "rows": rows,
@@ -529,6 +559,13 @@ _INDEX_HTML = """<!doctype html>
         <label for=\"top_n\">Top N</label>
         <input id=\"top_n\" type=\"number\" value=\"10\" min=\"1\" max=\"200\" />
       </div>
+      <div>
+        <label for=\"hourly_mode\">Hourly baseline</label>
+        <select id=\"hourly_mode\">
+          <option value=\"pct\" selected>P10/P50/P90</option>
+          <option value=\"minmax\">Min/Mean/Max</option>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -658,6 +695,7 @@ _INDEX_HTML = """<!doctype html>
   const minConfInput = document.getElementById('min_conf');
   const topModeInput = document.getElementById('top_mode');
   const topNInput = document.getElementById('top_n');
+  const hourlyModeInput = document.getElementById('hourly_mode');
 
   const beforeInput = document.getElementById('before');
   const afterInput = document.getElementById('after');
@@ -961,7 +999,8 @@ _INDEX_HTML = """<!doctype html>
     const minConf = minConfInput.value;
     const species = speciesInput.value.trim();
 
-    const url = `/api/activity/hourly_stats?species=${encodeURIComponent(species)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const mode = hourlyModeInput.value;
+    const url = `/api/activity/hourly_stats?species=${encodeURIComponent(species)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}&mode=${encodeURIComponent(mode)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -971,54 +1010,110 @@ _INDEX_HTML = """<!doctype html>
     const vMin = data.rows.map(r => r.min);
     const vMax = data.rows.map(r => r.max);
     const vMean = data.rows.map(r => r.mean);
+
+    const vP10 = data.rows.map(r => r.p10);
+    const vP50 = data.rows.map(r => r.p50);
+    const vP90 = data.rows.map(r => r.p90);
+    const vActiveRate = data.rows.map(r => (r.active_rate || 0) * 100.0);
+
     const vToday = data.rows.map(r => r.today);
 
     const ctx = document.getElementById('chart_species');
     if (chartSpecies) chartSpecies.destroy();
+    const baselineMode = data.mode || 'pct';
+
+    const datasets = [];
+
+    if (baselineMode === 'minmax') {
+      datasets.push({
+        type: 'line',
+        label: 'Min (all-time, per-day)',
+        data: vMin,
+        borderColor: 'rgba(0,0,0,0.25)',
+        backgroundColor: 'rgba(0,0,0,0.05)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+      datasets.push({
+        type: 'line',
+        label: 'Mean (all-time, per-day)',
+        data: vMean,
+        borderColor: 'rgba(99, 102, 241, 0.95)',
+        backgroundColor: 'rgba(99, 102, 241, 0.10)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+      datasets.push({
+        type: 'line',
+        label: 'Max (all-time, per-day)',
+        data: vMax,
+        borderColor: 'rgba(0,0,0,0.55)',
+        backgroundColor: 'rgba(0,0,0,0.08)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+    } else {
+      datasets.push({
+        type: 'line',
+        label: 'P10 (all-time, per-day)',
+        data: vP10,
+        borderColor: 'rgba(0,0,0,0.25)',
+        backgroundColor: 'rgba(0,0,0,0.05)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+      datasets.push({
+        type: 'line',
+        label: 'P50 (median, all-time)',
+        data: vP50,
+        borderColor: 'rgba(99, 102, 241, 0.95)',
+        backgroundColor: 'rgba(99, 102, 241, 0.10)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+      datasets.push({
+        type: 'line',
+        label: 'P90 (all-time, per-day)',
+        data: vP90,
+        borderColor: 'rgba(0,0,0,0.55)',
+        backgroundColor: 'rgba(0,0,0,0.08)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y',
+      });
+      datasets.push({
+        type: 'line',
+        label: '% days active',
+        data: vActiveRate,
+        borderColor: 'rgba(34, 197, 94, 0.9)',
+        backgroundColor: 'rgba(34, 197, 94, 0.12)',
+        tension: 0.2,
+        pointRadius: 0,
+        yAxisID: 'y1',
+      });
+    }
+
+    datasets.push({
+      type: 'bar',
+      label: `Today (${data.today.date})`,
+      data: vToday,
+      backgroundColor: 'rgba(255, 159, 64, 0.55)',
+      borderWidth: 0,
+      yAxisID: 'y',
+    });
+
     chartSpecies = new Chart(ctx, {
-      data: {
-        labels,
-        datasets: [
-          {
-            type: 'line',
-            label: 'Min (all-time, per-day)',
-            data: vMin,
-            borderColor: 'rgba(0,0,0,0.25)',
-            backgroundColor: 'rgba(0,0,0,0.05)',
-            tension: 0.2,
-            pointRadius: 0,
-          },
-          {
-            type: 'line',
-            label: 'Mean (all-time, per-day)',
-            data: vMean,
-            borderColor: 'rgba(99, 102, 241, 0.95)',
-            backgroundColor: 'rgba(99, 102, 241, 0.10)',
-            tension: 0.2,
-            pointRadius: 0,
-          },
-          {
-            type: 'line',
-            label: 'Max (all-time, per-day)',
-            data: vMax,
-            borderColor: 'rgba(0,0,0,0.55)',
-            backgroundColor: 'rgba(0,0,0,0.08)',
-            tension: 0.2,
-            pointRadius: 0,
-          },
-          {
-            type: 'bar',
-            label: `Today (${data.today.date})`,
-            data: vToday,
-            backgroundColor: 'rgba(255, 159, 64, 0.55)',
-            borderWidth: 0,
-          },
-        ]
-      },
+      data: { labels, datasets },
       options: {
         responsive: true,
         scales: {
-          y: { beginAtZero: true }
+          y: { beginAtZero: true, position: 'left' },
+          y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, suggestedMax: 100 },
         }
       }
     });
@@ -1044,7 +1139,7 @@ _INDEX_HTML = """<!doctype html>
   runSpeciesBtn.addEventListener('click', async () => { await runSpecies(); setUpdated(); });
 
   // Recompute on control changes
-  for (const el of [tzInput, minConfInput, topModeInput, topNInput]) {
+  for (const el of [tzInput, minConfInput, topModeInput, topNInput, hourlyModeInput]) {
     el.addEventListener('change', () => {
       if (topModeInput.value === 'all') {
         topNInput.disabled = true;
