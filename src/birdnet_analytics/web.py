@@ -219,9 +219,9 @@ def create_app() -> FastAPI:
 
         return {"q": q, "limit": limit, "rows": [{"name": n, "count": c} for (n, c) in rows]}
 
-    @app.get("/api/species/activity")
-    def api_species_activity(
-        name: str = Query(..., description="Common name (notes.common_name)"),
+    @app.get("/api/activity/hourly")
+    def api_activity_hourly(
+        species: str = Query(default="", description="Optional common name filter"),
         days: str = Query(default="all", description="Number of days back (e.g. 30) or 'all'"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
@@ -229,14 +229,19 @@ def create_app() -> FastAPI:
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
         limit_days = _parse_days_param(days)
+        species = (species or "").strip()
 
         db = BirdnetDb(_resolve_birdnet_db_path())
         with db.connect_ro() as con:
-            min_day, max_day = con.execute(
-                "SELECT min(date), max(date) FROM notes WHERE common_name = ?", (name,)
-            ).fetchone()
+            if species:
+                min_day, max_day = con.execute(
+                    "SELECT min(date), max(date) FROM notes WHERE common_name = ?", (species,)
+                ).fetchone()
+            else:
+                min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+
             if not min_day or not max_day:
-                return {"name": name, "tz": tz_name_eff, "rows": []}
+                return {"species": species or None, "tz": tz_name_eff, "rows": []}
 
             end_day = date.fromisoformat(max_day)
             if limit_days is None:
@@ -249,22 +254,27 @@ def create_app() -> FastAPI:
 
             buckets = {h: 0 for h in range(24)}
 
-            for (bt, conf) in con.execute(
-                """
-                SELECT begin_time, confidence FROM notes
-                WHERE common_name = ?
-                  AND date >= ? AND date <= ?
-                  AND begin_time IS NOT NULL
-                """,
-                (name, start_day.isoformat(), end_day.isoformat()),
-            ):
+            if species:
+                q = (
+                    "SELECT begin_time, confidence FROM notes "
+                    "WHERE common_name = ? AND date >= ? AND date <= ? AND begin_time IS NOT NULL"
+                )
+                params = (species, start_day.isoformat(), end_day.isoformat())
+            else:
+                q = (
+                    "SELECT begin_time, confidence FROM notes "
+                    "WHERE date >= ? AND date <= ? AND begin_time IS NOT NULL"
+                )
+                params = (start_day.isoformat(), end_day.isoformat())
+
+            for (bt, conf) in con.execute(q, params):
                 if conf is None or float(conf) < min_confidence:
                     continue
                 dt = _parse_begin_time(bt).astimezone(tz)
                 buckets[dt.hour] += 1
 
         return {
-            "name": name,
+            "species": species or None,
             "tz": tz_name_eff,
             "min_confidence": min_confidence,
             "start": start_day.isoformat(),
@@ -389,8 +399,15 @@ _INDEX_HTML = """<!doctype html>
         <input id=\"min_conf\" type=\"number\" value=\"0.0\" min=\"0\" max=\"1\" step=\"0.01\" />
       </div>
       <div>
+        <label for=\"top_mode\">Species list</label>
+        <select id=\"top_mode\">
+          <option value=\"top\" selected>Top N</option>
+          <option value=\"all\">All</option>
+        </select>
+      </div>
+      <div>
         <label for=\"top_n\">Top N</label>
-        <input id=\"top_n\" type=\"number\" value=\"10\" min=\"1\" max=\"50\" />
+        <input id=\"top_n\" type=\"number\" value=\"10\" min=\"1\" max=\"200\" />
       </div>
     </div>
   </div>
@@ -470,11 +487,11 @@ _INDEX_HTML = """<!doctype html>
   </div>
 
   <div class=\"card\">
-    <h2 style=\"margin:0 0 8px 0\">Species activity (detections by hour of day)</h2>
+    <h2 style=\"margin:0 0 8px 0\">Detections by hour of day</h2>
     <div class=\"row\">
       <div style=\"min-width: 280px\">
-        <label for=\"species\">Common name (search)</label>
-        <input id=\"species\" type=\"text\" placeholder=\"Song Sparrow\" list=\"species_list\" autocomplete=\"off\" />
+        <label for=\"species\">Species (optional; blank = all)</label>
+        <input id=\"species\" type=\"text\" placeholder=\"(all species)\" list=\"species_list\" autocomplete=\"off\" />
         <datalist id=\"species_list\"></datalist>
       </div>
       <div>
@@ -500,6 +517,7 @@ _INDEX_HTML = """<!doctype html>
   const dayInput = document.getElementById('day');
   const tzInput = document.getElementById('tz');
   const minConfInput = document.getElementById('min_conf');
+  const topModeInput = document.getElementById('top_mode');
   const topNInput = document.getElementById('top_n');
 
   const beforeInput = document.getElementById('before');
@@ -660,7 +678,10 @@ _INDEX_HTML = """<!doctype html>
 
   async function updateSpeciesDatalist() {
     const q = speciesInput.value.trim();
-    const url = `/api/species/search?q=${encodeURIComponent(q)}&limit=20`;
+    const mode = topModeInput.value;
+    const limit = (mode === 'all') ? 200 : (parseInt(topNInput.value, 10) || 10);
+    // If blank, show most frequent species (top-N or all-ish).
+    const url = `/api/species/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`;
     const resp = await fetch(url);
     const data = await resp.json();
     const dl = document.getElementById('species_list');
@@ -680,14 +701,10 @@ _INDEX_HTML = """<!doctype html>
   async function runSpecies() {
     const tz = tzInput.value;
     const minConf = minConfInput.value;
-    const name = speciesInput.value.trim();
+    const species = speciesInput.value.trim();
     const days = speciesDays.value.trim() || 'all';
-    if (!name) {
-      alert('Enter a species common name.');
-      return;
-    }
 
-    const url = `/api/species/activity?name=${encodeURIComponent(name)}&days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const url = `/api/activity/hourly?species=${encodeURIComponent(species)}&days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -703,7 +720,7 @@ _INDEX_HTML = """<!doctype html>
       data: {
         labels,
         datasets: [{
-          label: 'Detections',
+          label: data.species ? `Detections (${data.species})` : 'Detections (all species)',
           data: values,
           backgroundColor: 'rgba(99, 102, 241, 0.6)',
           borderColor: 'rgba(99, 102, 241, 1)',
@@ -727,9 +744,7 @@ _INDEX_HTML = """<!doctype html>
     await runDawn();
     await runWow();
     await runDayparts();
-    if (speciesInput.value.trim()) {
-      await runSpecies();
-    }
+    await runSpecies();
     setUpdated();
   }
 
@@ -739,9 +754,18 @@ _INDEX_HTML = """<!doctype html>
   runSpeciesBtn.addEventListener('click', async () => { await runSpecies(); setUpdated(); });
 
   // Recompute on control changes
-  for (const el of [tzInput, minConfInput, topNInput]) {
-    el.addEventListener('change', refreshAll);
+  for (const el of [tzInput, minConfInput, topModeInput, topNInput]) {
+    el.addEventListener('change', () => {
+      if (topModeInput.value === 'all') {
+        topNInput.disabled = true;
+      } else {
+        topNInput.disabled = false;
+      }
+      refreshAll();
+    });
   }
+  // initialize
+  if (topModeInput.value === 'all') topNInput.disabled = true;
 
   // Initial
   updateSpeciesDatalist();
