@@ -244,13 +244,17 @@ def create_app() -> FastAPI:
             buckets[dt.hour] += 1
         return buckets
 
-    @app.get("/api/activity/hourly_compare")
-    def api_activity_hourly_compare(
+    @app.get("/api/activity/hourly_stats")
+    def api_activity_hourly_stats(
         species: str = Query(default="", description="Optional common name filter"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
-        """Return hourly histogram for all-time plus today (latest date in DB)."""
+        """Hourly activity stats across days: min/max/mean per hour + today's per-hour counts.
+
+        - min/max/mean are computed over DAILY counts for each hour-of-day.
+        - today is the latest `notes.date` in the DB.
+        """
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
         species = (species or "").strip()
@@ -265,21 +269,40 @@ def create_app() -> FastAPI:
                 min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
 
             if not min_day or not max_day:
-                return {"species": species or None, "tz": tz_name_eff, "rows_all": [], "rows_today": []}
+                return {"species": species or None, "tz": tz_name_eff, "rows": []}
 
             start_day = date.fromisoformat(min_day)
             end_day = date.fromisoformat(max_day)
             today_day = end_day
 
-            buckets_all = _hourly_buckets(
-                con=con,
-                tz=tz,
-                start_day=start_day,
-                end_day=end_day,
-                species=species,
-                min_confidence=min_confidence,
-            )
-            buckets_today = _hourly_buckets(
+            # Stats accumulators: per hour, keep min/max/sum and number of days.
+            mins = {h: None for h in range(24)}
+            maxs = {h: 0 for h in range(24)}
+            sums = {h: 0 for h in range(24)}
+            day_count = 0
+
+            cur = start_day
+            while cur <= end_day:
+                day_s = cur.isoformat()
+                buckets = _hourly_buckets(
+                    con=con,
+                    tz=tz,
+                    start_day=cur,
+                    end_day=cur,
+                    species=species,
+                    min_confidence=min_confidence,
+                )
+                day_count += 1
+                for h in range(24):
+                    v = buckets[h]
+                    if mins[h] is None or v < mins[h]:
+                        mins[h] = v
+                    if v > maxs[h]:
+                        maxs[h] = v
+                    sums[h] += v
+                cur += timedelta(days=1)
+
+            today_buckets = _hourly_buckets(
                 con=con,
                 tz=tz,
                 start_day=today_day,
@@ -288,14 +311,26 @@ def create_app() -> FastAPI:
                 min_confidence=min_confidence,
             )
 
+        rows = []
+        for h in range(24):
+            mean = (sums[h] / day_count) if day_count else 0.0
+            rows.append(
+                {
+                    "hour": h,
+                    "min": int(mins[h] or 0),
+                    "max": int(maxs[h]),
+                    "mean": float(mean),
+                    "today": int(today_buckets[h]),
+                }
+            )
+
         return {
             "species": species or None,
             "tz": tz_name_eff,
             "min_confidence": min_confidence,
-            "all": {"start": start_day.isoformat(), "end": end_day.isoformat()},
+            "all": {"start": start_day.isoformat(), "end": end_day.isoformat(), "days": day_count},
             "today": {"date": today_day.isoformat()},
-            "rows_all": [{"hour": h, "detections": buckets_all[h]} for h in range(24)],
-            "rows_today": [{"hour": h, "detections": buckets_today[h]} for h in range(24)],
+            "rows": rows,
         }
 
     @app.get("/api/topshare/daily")
@@ -926,15 +961,17 @@ _INDEX_HTML = """<!doctype html>
     const minConf = minConfInput.value;
     const species = speciesInput.value.trim();
 
-    const url = `/api/activity/hourly_compare?species=${encodeURIComponent(species)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
+    const url = `/api/activity/hourly_stats?species=${encodeURIComponent(species)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
     rawSpecies.textContent = JSON.stringify(data, null, 2);
 
-    const labels = data.rows_all.map(r => String(r.hour).padStart(2,'0') + ':00');
-    const valuesAll = data.rows_all.map(r => r.detections);
-    const valuesToday = data.rows_today.map(r => r.detections);
+    const labels = data.rows.map(r => String(r.hour).padStart(2,'0') + ':00');
+    const vMin = data.rows.map(r => r.min);
+    const vMax = data.rows.map(r => r.max);
+    const vMean = data.rows.map(r => r.mean);
+    const vToday = data.rows.map(r => r.today);
 
     const ctx = document.getElementById('chart_species');
     if (chartSpecies) chartSpecies.destroy();
@@ -943,23 +980,39 @@ _INDEX_HTML = """<!doctype html>
         labels,
         datasets: [
           {
-            type: 'bar',
-            label: data.species ? `All-time (${data.species})` : 'All-time (all species)',
-            data: valuesAll,
-            backgroundColor: 'rgba(99, 102, 241, 0.35)',
-            borderWidth: 0,
-            yAxisID: 'y',
+            type: 'line',
+            label: 'Min (all-time, per-day)',
+            data: vMin,
+            borderColor: 'rgba(0,0,0,0.25)',
+            backgroundColor: 'rgba(0,0,0,0.05)',
+            tension: 0.2,
+            pointRadius: 0,
           },
           {
             type: 'line',
-            label: `Today (${data.today.date})`,
-            data: valuesToday,
-            borderColor: 'rgba(0, 0, 0, 0.8)',
-            backgroundColor: 'rgba(0, 0, 0, 0.1)',
+            label: 'Mean (all-time, per-day)',
+            data: vMean,
+            borderColor: 'rgba(99, 102, 241, 0.95)',
+            backgroundColor: 'rgba(99, 102, 241, 0.10)',
             tension: 0.2,
-            pointRadius: 1,
-            yAxisID: 'y',
-          }
+            pointRadius: 0,
+          },
+          {
+            type: 'line',
+            label: 'Max (all-time, per-day)',
+            data: vMax,
+            borderColor: 'rgba(0,0,0,0.55)',
+            backgroundColor: 'rgba(0,0,0,0.08)',
+            tension: 0.2,
+            pointRadius: 0,
+          },
+          {
+            type: 'bar',
+            label: `Today (${data.today.date})`,
+            data: vToday,
+            backgroundColor: 'rgba(255, 159, 64, 0.55)',
+            borderWidth: 0,
+          },
         ]
       },
       options: {
