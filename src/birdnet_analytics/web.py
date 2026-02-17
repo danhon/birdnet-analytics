@@ -553,16 +553,44 @@ _INDEX_HTML = """<!doctype html>
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>birdnet-analytics</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; max-width: 980px; }
+    :root { --page-max: 980px; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 24px;
+      max-width: var(--page-max);
+    }
     h1 { margin: 0 0 12px 0; }
+    h2 { font-size: 18px; }
+
     .row { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; }
     label { display: block; font-size: 12px; color: #444; margin-bottom: 6px; }
-    input, select { padding: 8px; font-size: 14px; }
+    input, select { padding: 8px; font-size: 14px; max-width: 100%; }
     button { padding: 9px 12px; font-size: 14px; cursor: pointer; }
+
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-top: 16px; }
     .muted { color: #666; font-size: 13px; }
-    canvas { width: 100%; max-height: 360px; }
+
+    /* Chart container: allow a taller plot on narrow screens */
+    .chartWrap { width: 100%; height: 360px; }
+    canvas { width: 100% !important; height: 100% !important; }
+
     pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
+
+    /* Mobile portrait tweaks */
+    @media (max-width: 520px) {
+      body { margin: 12px; }
+      h1 { font-size: 22px; }
+      h2 { font-size: 16px; }
+      .card { padding: 12px; }
+      .row { gap: 10px; }
+      button { width: 100%; }
+      .chartWrap { height: 260px; }
+    }
+
+    /* Ultra narrow */
+    @media (max-width: 380px) {
+      .chartWrap { height: 220px; }
+    }
   </style>
   <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js\"></script>
 </head>
@@ -622,7 +650,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div style=\"margin-top: 16px\">
+    <div class=\"chartWrap\" style=\"margin-top: 16px\">
       <canvas id=\"chart_dawn\"></canvas>
     </div>
 
@@ -644,7 +672,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div style=\"margin-top: 16px\">
+    <div class=\"chartWrap\" style=\"margin-top: 16px\">
       <canvas id=\"chart_wow\"></canvas>
     </div>
 
@@ -666,7 +694,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div style=\"margin-top: 16px\">
+    <div class=\"chartWrap\" style=\"margin-top: 16px\">
       <canvas id=\"chart_topshare\"></canvas>
     </div>
 
@@ -688,7 +716,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div style=\"margin-top: 16px\">
+    <div class=\"chartWrap\" style=\"margin-top: 16px\">
       <canvas id=\"chart_dayparts\"></canvas>
     </div>
 
@@ -712,7 +740,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div style=\"margin-top: 16px\">
+    <div class=\"chartWrap\" style=\"margin-top: 16px\">
       <canvas id=\"chart_species\"></canvas>
     </div>
 
@@ -794,6 +822,7 @@ _INDEX_HTML = """<!doctype html>
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         scales: {
           y: { beginAtZero: true }
         }
@@ -841,6 +870,7 @@ _INDEX_HTML = """<!doctype html>
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         scales: {
           y: { beginAtZero: true, position: 'left' },
           y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false } },
@@ -910,6 +940,7 @@ _INDEX_HTML = """<!doctype html>
       data: { labels, datasets },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         plugins: {
           tooltip: {
             callbacks: {
@@ -993,6 +1024,7 @@ _INDEX_HTML = """<!doctype html>
       data: { labels, datasets: [...barDatasets, uniqDataset, precipDataset] },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         scales: {
           x: { stacked: true },
           y: { stacked: true, beginAtZero: true, position: 'left' },
