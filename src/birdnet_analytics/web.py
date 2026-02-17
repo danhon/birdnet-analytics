@@ -572,6 +572,7 @@ _INDEX_HTML = """<!doctype html>
 
     /* Chart container: allow a taller plot on narrow screens */
     .chartWrap { width: 100%; height: 360px; }
+    .chartWrap--short { height: 300px; }
     canvas { width: 100% !important; height: 100% !important; }
 
     pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
@@ -585,6 +586,7 @@ _INDEX_HTML = """<!doctype html>
       .row { gap: 10px; }
       button { width: 100%; }
       .chartWrap { height: 260px; }
+      .chartWrap--short { height: 210px; }
     }
 
     /* Ultra narrow */
@@ -740,7 +742,7 @@ _INDEX_HTML = """<!doctype html>
       </div>
     </div>
 
-    <div class=\"chartWrap\" style=\"margin-top: 16px\">
+    <div class=\"chartWrap chartWrap--short\" style=\"margin-top: 16px\">
       <canvas id=\"chart_species\"></canvas>
     </div>
 
