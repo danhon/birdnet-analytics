@@ -570,11 +570,13 @@ _INDEX_HTML = """<!doctype html>
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-top: 16px; }
     .muted { color: #666; font-size: 13px; }
 
-    /* Chart container: allow a taller plot on narrow screens */
-    .chartWrap { width: 100%; height: 360px; }
+    /* Chart container: explicit height so Chart.js can size correctly (with maintainAspectRatio=false). */
+    .chartWrap { width: 100%; height: 360px; position: relative; }
     .chartWrap--short { height: 300px; }
     .chartWrap--tall { height: 540px; }
-    canvas { width: 100% !important; height: 100% !important; }
+
+    /* Don't force canvas bitmap scaling; let Chart.js manage size. */
+    canvas { display: block; width: 100%; }
 
     pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
 
