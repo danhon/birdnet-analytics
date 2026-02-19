@@ -816,9 +816,14 @@ _INDEX_HTML = """<!doctype html>
     </div>
 
     <div class=\"chartWrap chartWrap--tall\" style=\"margin-top: 16px\">
-      <canvas id=\"chart_dawn_by_day\"></canvas>
+      <canvas id=\"chart_dawn_by_day_heatmap\"></canvas>
     </div>
     <div id=\"dawn_by_day_hover\" class=\"muted\" style=\"margin-top: 8px\">Hover a cell to see details</div>
+
+    <div class=\"chartWrap chartWrap--tall\" style=\"margin-top: 16px\">
+      <canvas id=\"chart_dawn_by_day_stacked\"></canvas>
+    </div>
+    <div class=\"muted\" style=\"margin-top: 8px\">Stacked chart is normalized: each day sums to 100% (shape comparison).</div>
 
     <details style=\"margin-top: 12px\">
       <summary class=\"muted\">Raw JSON</summary>
@@ -957,6 +962,7 @@ _INDEX_HTML = """<!doctype html>
   dayInput.value = today.toISOString().slice(0,10);
 
   let chartDawn;
+  let chartDawnByDay;
   let chartWow;
   let chartTopshare;
   let chartDayparts;
@@ -1024,7 +1030,7 @@ _INDEX_HTML = """<!doctype html>
     const grid = data.rows.map(r => r.buckets);
     const maxVal = Math.max(0, ...grid.flat().map(v => Number(v || 0)));
 
-    const canvas = document.getElementById('chart_dawn_by_day');
+    const canvas = document.getElementById('chart_dawn_by_day_heatmap');
     const hoverEl = document.getElementById('dawn_by_day_hover');
 
     function colorFor(v) {
@@ -1149,7 +1155,55 @@ _INDEX_HTML = """<!doctype html>
       hoverEl.textContent = `${daysList[di]} @ ${bucketLabels[bi]}: ${v} detections (max cell: ${maxVal})`;
     };
 
-    window.addEventListener('resize', () => { draw(); });
+    // Stacked bar (normalized to 100% per day)
+    const totals = data.rows.map(r => r.total || 0);
+    const datasets = bucketLabels.map((bl, i) => {
+      const hue = Math.round((i * 360) / Math.max(1, bucketLabels.length));
+      return {
+        label: bl,
+        data: data.rows.map((r, di) => {
+          const t = totals[di] || 0;
+          const v = (r.buckets[i] || 0);
+          return t > 0 ? (100.0 * v / t) : 0;
+        }),
+        backgroundColor: `hsla(${hue}, 70%, 55%, 0.65)`,
+        borderColor: `hsla(${hue}, 70%, 40%, 1)`,
+        borderWidth: 1,
+        stack: 'dawn',
+      };
+    });
+
+    const ctxStacked = document.getElementById('chart_dawn_by_day_stacked');
+    if (chartDawnByDay) chartDawnByDay.destroy();
+    chartDawnByDay = new Chart(ctxStacked, {
+      type: 'bar',
+      data: { labels: daysList, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 15 } },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            suggestedMax: 100,
+            ticks: { callback: (v) => v + '%' }
+          },
+        }
+      }
+    });
+
+    // Resize redraw (heatmap)
+    if (!window._dawnByDayHeatmapResizeHook) {
+      window._dawnByDayHeatmapResizeHook = true;
+      window.addEventListener('resize', () => { if (window._dawnByDayHeatmapRedraw) window._dawnByDayHeatmapRedraw(); });
+    }
+    window._dawnByDayHeatmapRedraw = draw;
   }
 
   async function runWow() {
