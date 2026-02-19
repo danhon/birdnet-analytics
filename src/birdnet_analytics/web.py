@@ -41,15 +41,19 @@ def _parse_begin_time(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def _dawn_hourly_for_day(
+def _dawn_buckets_for_day(
     *,
     con,
     day: str,
     tz: ZoneInfo,
     before_min: int,
     after_min: int,
+    bucket_min: int,
     min_confidence: float,
 ) -> list[dict]:
+    if bucket_min <= 0 or bucket_min > 60:
+        raise ValueError("bucket_min must be between 1 and 60")
+
     lat, lon = guess_lat_lon(con)
     sun_times = compute_sun_times(
         on_date=date.fromisoformat(day), latitude=lat, longitude=lon, tz_name=str(tz.key)
@@ -60,7 +64,8 @@ def _dawn_hourly_for_day(
         after=timedelta(minutes=after_min),
     )
 
-    buckets: dict[int, int] = {}
+    # Bucket by clock time (e.g. 15-minute increments): 06:00, 06:15, 06:30, ...
+    buckets: dict[datetime, int] = {}
     for (bt, conf) in con.execute(
         "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
         (day,),
@@ -68,10 +73,17 @@ def _dawn_hourly_for_day(
         if conf is None or float(conf) < min_confidence:
             continue
         dt = _parse_begin_time(bt).astimezone(tz)
-        if start <= dt < end:
-            buckets[dt.hour] = buckets.get(dt.hour, 0) + 1
+        if not (start <= dt < end):
+            continue
 
-    return [{"hour": h, "detections": buckets[h]} for h in sorted(buckets)]
+        minute = (dt.minute // bucket_min) * bucket_min
+        bdt = dt.replace(minute=minute, second=0, microsecond=0)
+        buckets[bdt] = buckets.get(bdt, 0) + 1
+
+    return [
+        {"time": bdt.strftime("%H:%M"), "detections": buckets[bdt]}
+        for bdt in sorted(buckets)
+    ]
 
 
 def _dayparts() -> list[tuple[str, int, int]]:
@@ -105,6 +117,7 @@ def create_app() -> FastAPI:
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         before_min: int = 90,
         after_min: int = 150,
+        bucket_min: int = Query(default=15, ge=1, le=60, description="Bucket size in minutes"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
     ):
         tz_name_eff = tz_name.strip() or settings.tz_name
@@ -112,12 +125,13 @@ def create_app() -> FastAPI:
         db_path = _resolve_birdnet_db_path()
         db = BirdnetDb(db_path)
         with db.connect_ro() as con:
-            rows = _dawn_hourly_for_day(
+            rows = _dawn_buckets_for_day(
                 con=con,
                 day=day,
                 tz=tz,
                 before_min=before_min,
                 after_min=after_min,
+                bucket_min=bucket_min,
                 min_confidence=min_confidence,
             )
         return {
@@ -125,6 +139,7 @@ def create_app() -> FastAPI:
             "tz": tz_name_eff,
             "before_min": before_min,
             "after_min": after_min,
+            "bucket_min": bucket_min,
             "min_confidence": min_confidence,
             "rows": rows,
         }
@@ -637,7 +652,7 @@ _INDEX_HTML = """<!doctype html>
   </div>
 
   <div class=\"card\">
-    <h2 style=\"margin:0 0 8px 0\">Dawn chorus (detections/hour)</h2>
+    <h2 style=\"margin:0 0 8px 0\">Dawn chorus (detections / 15 min)</h2>
     <div class=\"row\">
       <div>
         <label for=\"day\">Date</label>
@@ -803,13 +818,13 @@ _INDEX_HTML = """<!doctype html>
     const before = beforeInput.value;
     const after = afterInput.value;
 
-    const url = `/api/dawn/hourly?day=${encodeURIComponent(day)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}&before_min=${encodeURIComponent(before)}&after_min=${encodeURIComponent(after)}`;
+    const url = `/api/dawn/hourly?day=${encodeURIComponent(day)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}&before_min=${encodeURIComponent(before)}&after_min=${encodeURIComponent(after)}&bucket_min=15`;
     const resp = await fetch(url);
     const data = await resp.json();
 
     rawDawn.textContent = JSON.stringify(data, null, 2);
 
-    const labels = data.rows.map(r => String(r.hour).padStart(2,'0') + ':00');
+    const labels = data.rows.map(r => r.time);
     const values = data.rows.map(r => r.detections);
 
     const ctx = document.getElementById('chart_dawn');
@@ -830,6 +845,7 @@ _INDEX_HTML = """<!doctype html>
         responsive: true,
         maintainAspectRatio: false,
         scales: {
+          x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
           y: { beginAtZero: true }
         }
       }
