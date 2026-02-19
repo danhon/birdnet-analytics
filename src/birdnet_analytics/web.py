@@ -818,6 +818,7 @@ _INDEX_HTML = """<!doctype html>
     <div class=\"chartWrap chartWrap--tall\" style=\"margin-top: 16px\">
       <canvas id=\"chart_dawn_by_day\"></canvas>
     </div>
+    <div id=\"dawn_by_day_hover\" class=\"muted\" style=\"margin-top: 8px\">Hover a cell to see details</div>
 
     <details style=\"margin-top: 12px\">
       <summary class=\"muted\">Raw JSON</summary>
@@ -956,7 +957,6 @@ _INDEX_HTML = """<!doctype html>
   dayInput.value = today.toISOString().slice(0,10);
 
   let chartDawn;
-  let chartDawnByDay;
   let chartWow;
   let chartTopshare;
   let chartDayparts;
@@ -1016,56 +1016,140 @@ _INDEX_HTML = """<!doctype html>
 
     rawDawnByDay.textContent = JSON.stringify(data, null, 2);
 
-    const labels = data.days;
+    const daysList = data.days;
     const bucketLabels = data.bucket_labels;
 
-    // Build datasets as "15-min slice" series across days.
-    // Normalize each day to 100% so you can compare shape (not volume).
-    // If a day has 0 total detections, it will render as 0% across the board.
-    const totals = data.rows.map(r => r.total || 0);
+    // Heatmap: raw detections per (day x bucket). Color intensity is relative to the
+    // max bucket value across the whole chart.
+    const grid = data.rows.map(r => r.buckets);
+    const maxVal = Math.max(0, ...grid.flat().map(v => Number(v || 0)));
 
-    const datasets = bucketLabels.map((bl, i) => {
-      const hue = Math.round((i * 360) / Math.max(1, bucketLabels.length));
-      return {
-        label: bl,
-        data: data.rows.map((r, di) => {
-          const t = totals[di] || 0;
-          const v = (r.buckets[i] || 0);
-          return t > 0 ? (100.0 * v / t) : 0;
-        }),
-        backgroundColor: `hsla(${hue}, 70%, 55%, 0.65)`,
-        borderColor: `hsla(${hue}, 70%, 40%, 1)`,
-        borderWidth: 1,
-        stack: 'dawn',
-      };
-    });
+    const canvas = document.getElementById('chart_dawn_by_day');
+    const hoverEl = document.getElementById('dawn_by_day_hover');
 
-    const ctx = document.getElementById('chart_dawn_by_day');
-    if (chartDawnByDay) chartDawnByDay.destroy();
-    chartDawnByDay = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: {
-          legend: { position: 'bottom' },
-          tooltip: { mode: 'index', intersect: false },
-        },
-        scales: {
-          x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 15 } },
-          y: {
-            stacked: true,
-            beginAtZero: true,
-            suggestedMax: 100,
-            ticks: {
-              callback: (v) => v + '%'
-            }
-          },
+    function colorFor(v) {
+      if (maxVal <= 0) return 'rgba(220,220,220,0.6)';
+      const t = Math.max(0, Math.min(1, v / maxVal));
+      // Simple ramp: light -> hot (yellow/orange/red)
+      const r = Math.round(255 * t);
+      const g = Math.round(200 * (1 - t) + 60 * t);
+      const b = Math.round(60 * (1 - t));
+      return `rgba(${r},${g},${b},0.85)`;
+    }
+
+    function resizeCanvasToDisplaySize(c) {
+      const rect = c.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.floor(rect.width * dpr));
+      const h = Math.max(1, Math.floor(rect.height * dpr));
+      if (c.width !== w || c.height !== h) {
+        c.width = w;
+        c.height = h;
+        return true;
+      }
+      return false;
+    }
+
+    function draw() {
+      resizeCanvasToDisplaySize(canvas);
+      const ctx2 = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // Layout
+      const padLeft = 70;
+      const padBottom = 30;
+      const padTop = 10;
+      const padRight = 10;
+
+      const plotW = w - padLeft - padRight;
+      const plotH = h - padTop - padBottom;
+
+      const nDays = daysList.length;
+      const nBuckets = bucketLabels.length;
+
+      ctx2.clearRect(0, 0, w, h);
+
+      // Background
+      ctx2.fillStyle = 'white';
+      ctx2.fillRect(0, 0, w, h);
+
+      const cellW = plotW / Math.max(1, nDays);
+      const cellH = plotH / Math.max(1, nBuckets);
+
+      // Cells
+      for (let bi = 0; bi < nBuckets; bi++) {
+        for (let di = 0; di < nDays; di++) {
+          const v = Number((grid[di] && grid[di][bi]) || 0);
+          ctx2.fillStyle = colorFor(v);
+          const x = padLeft + di * cellW;
+          const y = padTop + bi * cellH;
+          ctx2.fillRect(x, y, cellW, cellH);
         }
       }
-    });
+
+      // Axis labels (bucket labels on Y)
+      ctx2.fillStyle = '#666';
+      ctx2.font = `${Math.round(12 * (window.devicePixelRatio || 1))}px system-ui, -apple-system, Segoe UI, Roboto, sans-serif`;
+      ctx2.textBaseline = 'middle';
+
+      // Show every Nth bucket label to avoid clutter
+      const yStep = Math.max(1, Math.round(nBuckets / 10));
+      for (let bi = 0; bi < nBuckets; bi += yStep) {
+        const y = padTop + bi * cellH + cellH / 2;
+        ctx2.fillText(bucketLabels[bi], 4, y);
+      }
+
+      // X axis: show every Nth day label
+      ctx2.textBaseline = 'alphabetic';
+      ctx2.textAlign = 'center';
+      const xStep = Math.max(1, Math.round(nDays / 10));
+      for (let di = 0; di < nDays; di += xStep) {
+        const x = padLeft + di * cellW + cellW / 2;
+        ctx2.fillText(daysList[di].slice(5), x, h - 8);
+      }
+
+      // Border
+      ctx2.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx2.strokeRect(padLeft, padTop, plotW, plotH);
+    }
+
+    // Initial draw
+    draw();
+
+    // Hover readout
+    canvas.onmousemove = (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const x = (ev.clientX - rect.left) * dpr;
+      const y = (ev.clientY - rect.top) * dpr;
+
+      const padLeft = 70;
+      const padBottom = 30;
+      const padTop = 10;
+      const padRight = 10;
+
+      const plotW = canvas.width - padLeft - padRight;
+      const plotH = canvas.height - padTop - padBottom;
+
+      if (x < padLeft || x > padLeft + plotW || y < padTop || y > padTop + plotH) {
+        hoverEl.textContent = 'Hover a cell to see details';
+        return;
+      }
+
+      const nDays = daysList.length;
+      const nBuckets = bucketLabels.length;
+      const cellW = plotW / Math.max(1, nDays);
+      const cellH = plotH / Math.max(1, nBuckets);
+
+      const di = Math.min(nDays - 1, Math.max(0, Math.floor((x - padLeft) / cellW)));
+      const bi = Math.min(nBuckets - 1, Math.max(0, Math.floor((y - padTop) / cellH)));
+
+      const v = Number((grid[di] && grid[di][bi]) || 0);
+      hoverEl.textContent = `${daysList[di]} @ ${bucketLabels[bi]}: ${v} detections (max cell: ${maxVal})`;
+    };
+
+    window.addEventListener('resize', () => { draw(); });
   }
 
   async function runWow() {
