@@ -86,6 +86,52 @@ def _dawn_buckets_for_day(
     ]
 
 
+def _dawn_bucket_offsets_for_day(
+    *,
+    con,
+    day: str,
+    tz: ZoneInfo,
+    before_min: int,
+    after_min: int,
+    bucket_min: int,
+    min_confidence: float,
+) -> dict[int, int]:
+    """Return counts keyed by bucket index relative to the dawn window start.
+
+    This is the right shape for a per-day stacked chart where each stack segment is a
+    15-minute slice within the (before_min/after_min) window.
+    """
+
+    if bucket_min <= 0 or bucket_min > 60:
+        raise ValueError("bucket_min must be between 1 and 60")
+
+    lat, lon = guess_lat_lon(con)
+    sun_times = compute_sun_times(
+        on_date=date.fromisoformat(day), latitude=lat, longitude=lon, tz_name=str(tz.key)
+    )
+    start, end = dawn_window(
+        sunrise=sun_times.sunrise,
+        before=timedelta(minutes=before_min),
+        after=timedelta(minutes=after_min),
+    )
+
+    buckets: dict[int, int] = {}
+    for (bt, conf) in con.execute(
+        "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+        (day,),
+    ):
+        if conf is None or float(conf) < min_confidence:
+            continue
+        dt = _parse_begin_time(bt).astimezone(tz)
+        if not (start <= dt < end):
+            continue
+
+        idx = int((dt - start).total_seconds() // (bucket_min * 60))
+        buckets[idx] = buckets.get(idx, 0) + 1
+
+    return buckets
+
+
 def _dayparts() -> list[tuple[str, int, int]]:
     # Fixed clock-time dayparts (local time), as requested.
     return [
@@ -142,6 +188,74 @@ def create_app() -> FastAPI:
             "bucket_min": bucket_min,
             "min_confidence": min_confidence,
             "rows": rows,
+        }
+
+    @app.get("/api/dawn/by_day")
+    def api_dawn_by_day(
+        days: str = Query(default="30", description="Number of days back (e.g. 30) or 'all'"),
+        tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
+        before_min: int = 90,
+        after_min: int = 150,
+        bucket_min: int = Query(default=15, ge=1, le=60, description="Bucket size in minutes"),
+        min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+    ):
+        tz_name_eff = tz_name.strip() or settings.tz_name
+        tz = ZoneInfo(tz_name_eff)
+        limit_days = _parse_days_param(days)
+
+        db = BirdnetDb(_resolve_birdnet_db_path())
+        with db.connect_ro() as con:
+            min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+            if not min_day or not max_day:
+                return {"tz": tz_name_eff, "rows": [], "bucket_labels": [], "days": []}
+
+            end_day = date.fromisoformat(max_day)
+            if limit_days is None:
+                start_day = date.fromisoformat(min_day)
+            else:
+                start_day = end_day - timedelta(days=limit_days - 1)
+                min_possible = date.fromisoformat(min_day)
+                if start_day < min_possible:
+                    start_day = min_possible
+
+            # Define the bucket labels as offsets from sunrise, so different sunrise clock
+            # times still line up for comparison.
+            n_buckets = int(((before_min + after_min) + bucket_min - 1) // bucket_min)
+            bucket_labels = []
+            for i in range(n_buckets):
+                offset = -before_min + (i * bucket_min)
+                sign = "+" if offset > 0 else ""
+                bucket_labels.append(f"{sign}{offset}m")
+
+            days_list: list[str] = [
+                (start_day + timedelta(days=i)).isoformat()
+                for i in range((end_day - start_day).days + 1)
+            ]
+
+            # Build a per-day row: {day, buckets:[...]} where buckets align with bucket_labels.
+            rows_out: list[dict] = []
+            for d in days_list:
+                counts = _dawn_bucket_offsets_for_day(
+                    con=con,
+                    day=d,
+                    tz=tz,
+                    before_min=before_min,
+                    after_min=after_min,
+                    bucket_min=bucket_min,
+                    min_confidence=min_confidence,
+                )
+                buckets = [counts.get(i, 0) for i in range(n_buckets)]
+                rows_out.append({"day": d, "buckets": buckets, "total": sum(buckets)})
+
+        return {
+            "tz": tz_name_eff,
+            "days": days_list,
+            "before_min": before_min,
+            "after_min": after_min,
+            "bucket_min": bucket_min,
+            "bucket_labels": bucket_labels,
+            "min_confidence": min_confidence,
+            "rows": rows_out,
         }
 
     @app.get("/api/dayparts/daily")
@@ -682,6 +796,36 @@ _INDEX_HTML = """<!doctype html>
   </div>
 
   <div class=\"card\">
+    <h2 style=\"margin:0 0 8px 0\">Dawn chorus by day (stacked: 15-min slices)</h2>
+    <div class=\"row\">
+      <div>
+        <label for=\"dawn_days\">Days</label>
+        <input id=\"dawn_days\" type=\"number\" value=\"30\" min=\"2\" max=\"3650\" />
+      </div>
+      <div>
+        <label for=\"dawn_before\">Minutes before sunrise</label>
+        <input id=\"dawn_before\" type=\"number\" value=\"90\" min=\"0\" />
+      </div>
+      <div>
+        <label for=\"dawn_after\">Minutes after sunrise</label>
+        <input id=\"dawn_after\" type=\"number\" value=\"150\" min=\"0\" />
+      </div>
+      <div>
+        <button id=\"run_dawn_by_day\">Run</button>
+      </div>
+    </div>
+
+    <div class=\"chartWrap chartWrap--tall\" style=\"margin-top: 16px\">
+      <canvas id=\"chart_dawn_by_day\"></canvas>
+    </div>
+
+    <details style=\"margin-top: 12px\">
+      <summary class=\"muted\">Raw JSON</summary>
+      <pre id=\"raw_dawn_by_day\"></pre>
+    </details>
+  </div>
+
+  <div class=\"card\">
     <h2 style=\"margin:0 0 8px 0\">Week over week (total detections + unique species)</h2>
     <div class=\"row\">
       <div>
@@ -782,13 +926,19 @@ _INDEX_HTML = """<!doctype html>
   const beforeInput = document.getElementById('before');
   const afterInput = document.getElementById('after');
 
+  const dawnDaysInput = document.getElementById('dawn_days');
+  const dawnBeforeInput = document.getElementById('dawn_before');
+  const dawnAfterInput = document.getElementById('dawn_after');
+
   const rawDawn = document.getElementById('raw_dawn');
+  const rawDawnByDay = document.getElementById('raw_dawn_by_day');
   const rawWow = document.getElementById('raw_wow');
   const rawTopshare = document.getElementById('raw_topshare');
   const rawDayparts = document.getElementById('raw_dayparts');
   const rawSpecies = document.getElementById('raw_species');
 
   const runBtn = document.getElementById('run');
+  const runDawnByDayBtn = document.getElementById('run_dawn_by_day');
   const runWowBtn = document.getElementById('run_wow');
   const runTopshareBtn = document.getElementById('run_topshare');
   const runDaypartsBtn = document.getElementById('run_dayparts');
@@ -806,6 +956,7 @@ _INDEX_HTML = """<!doctype html>
   dayInput.value = today.toISOString().slice(0,10);
 
   let chartDawn;
+  let chartDawnByDay;
   let chartWow;
   let chartTopshare;
   let chartDayparts;
@@ -847,6 +998,56 @@ _INDEX_HTML = """<!doctype html>
         scales: {
           x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
           y: { beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  async function runDawnByDay() {
+    const tz = tzInput.value;
+    const minConf = minConfInput.value;
+    const days = dawnDaysInput.value;
+    const before = dawnBeforeInput.value;
+    const after = dawnAfterInput.value;
+
+    const url = `/api/dawn/by_day?days=${encodeURIComponent(days)}&tz_name=${encodeURIComponent(tz)}&min_confidence=${encodeURIComponent(minConf)}&before_min=${encodeURIComponent(before)}&after_min=${encodeURIComponent(after)}&bucket_min=15`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+
+    rawDawnByDay.textContent = JSON.stringify(data, null, 2);
+
+    const labels = data.days;
+    const bucketLabels = data.bucket_labels;
+
+    // Build datasets as "15-min slice" series across days.
+    const datasets = bucketLabels.map((bl, i) => {
+      const hue = Math.round((i * 360) / Math.max(1, bucketLabels.length));
+      return {
+        label: bl,
+        data: data.rows.map(r => r.buckets[i] || 0),
+        backgroundColor: `hsla(${hue}, 70%, 55%, 0.65)`,
+        borderColor: `hsla(${hue}, 70%, 40%, 1)`,
+        borderWidth: 1,
+        stack: 'dawn',
+      };
+    });
+
+    const ctx = document.getElementById('chart_dawn_by_day');
+    if (chartDawnByDay) chartDawnByDay.destroy();
+    chartDawnByDay = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 15 } },
+          y: { stacked: true, beginAtZero: true },
         }
       }
     });
@@ -1260,6 +1461,7 @@ _INDEX_HTML = """<!doctype html>
 
   async function refreshAll() {
     await runDawn();
+    await runDawnByDay();
     await runWow();
     await runTopshare();
     await runDayparts();
@@ -1268,6 +1470,7 @@ _INDEX_HTML = """<!doctype html>
   }
 
   runBtn.addEventListener('click', async () => { await runDawn(); setUpdated(); });
+  runDawnByDayBtn.addEventListener('click', async () => { await runDawnByDay(); setUpdated(); });
   runWowBtn.addEventListener('click', async () => { await runWow(); setUpdated(); });
   runTopshareBtn.addEventListener('click', async () => { await runTopshare(); setUpdated(); });
   runDaypartsBtn.addEventListener('click', async () => { await runDayparts(); setUpdated(); });
