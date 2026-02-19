@@ -747,8 +747,8 @@ _INDEX_HTML = """<!doctype html>
       <div>
         <label for=\"top_mode\">Species list</label>
         <select id=\"top_mode\">
-          <option value=\"top\" selected>Top N</option>
-          <option value=\"all\">All</option>
+          <option value=\"top\">Top N</option>
+          <option value=\"all\" selected>All</option>
         </select>
       </div>
       <div>
