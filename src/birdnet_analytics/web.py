@@ -1020,11 +1020,19 @@ _INDEX_HTML = """<!doctype html>
     const bucketLabels = data.bucket_labels;
 
     // Build datasets as "15-min slice" series across days.
+    // Normalize each day to 100% so you can compare shape (not volume).
+    // If a day has 0 total detections, it will render as 0% across the board.
+    const totals = data.rows.map(r => r.total || 0);
+
     const datasets = bucketLabels.map((bl, i) => {
       const hue = Math.round((i * 360) / Math.max(1, bucketLabels.length));
       return {
         label: bl,
-        data: data.rows.map(r => r.buckets[i] || 0),
+        data: data.rows.map((r, di) => {
+          const t = totals[di] || 0;
+          const v = (r.buckets[i] || 0);
+          return t > 0 ? (100.0 * v / t) : 0;
+        }),
         backgroundColor: `hsla(${hue}, 70%, 55%, 0.65)`,
         borderColor: `hsla(${hue}, 70%, 40%, 1)`,
         borderWidth: 1,
@@ -1047,7 +1055,14 @@ _INDEX_HTML = """<!doctype html>
         },
         scales: {
           x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 15 } },
-          y: { stacked: true, beginAtZero: true },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            suggestedMax: 100,
+            ticks: {
+              callback: (v) => v + '%'
+            }
+          },
         }
       }
     });
