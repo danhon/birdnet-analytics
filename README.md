@@ -29,6 +29,27 @@ Notes:
 
 ## Quickstart (demo)
 
+### Option A: docker compose (recommended)
+
+Prereqs:
+- Docker + **docker compose**
+
+Setup:
+```sh
+cp .env.example .env
+# edit .env and set BIRDNET_DB_HOST_PATH=/absolute/path/to/birdnet.db
+```
+
+Run:
+```sh
+docker compose up --build
+```
+
+What you should see:
+- A local server at <http://127.0.0.1:8787/>
+
+### Option B: local dev (uv)
+
 Prereqs:
 - Python + **uv**
 
@@ -37,7 +58,6 @@ Setup:
 cd birdnet-analytics
 uv venv
 uv sync
-cp .env.example .env  # if present; otherwise use env vars below
 ```
 
 Run a script (schema print):
@@ -47,13 +67,10 @@ uv run python scripts/print_schema.py /path/to/birdnet.db
 
 Run the web dashboard locally:
 ```sh
-export BIRDNET_DB_PATH=_data/sample/birdnet.db
+export BIRDNET_DB_PATH=/path/to/birdnet.db
 export BIRDNET_ANALYTICS_TZ=America/Los_Angeles
 uv run uvicorn birdnet_analytics.web:app --reload --port 8787
 ```
-
-What you should see:
-- A local server at <http://127.0.0.1:8787/>
 
 ## How it works
 

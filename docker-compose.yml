@@ -1,0 +1,23 @@
+services:
+  birdnet-analytics:
+    build:
+      context: .
+    # For running a published multi-arch image later, swap build->image.
+    # image: ghcr.io/danhon/birdnet-analytics:latest
+    ports:
+      - "${BIRDNET_ANALYTICS_PORT:-8787}:8787"
+    environment:
+      # Inside-container path; the host path is mounted below.
+      BIRDNET_DB_PATH: /data/birdnet.db
+      BIRDNET_ANALYTICS_TZ: ${BIRDNET_ANALYTICS_TZ:-America/Los_Angeles}
+      # Reserved for persistent app state / future rollups
+      BIRDNET_ANALYTICS_STATE_DIR: /var/lib/birdnet-analytics
+    volumes:
+      # Host DB path must be set in .env (read-only)
+      - ${BIRDNET_DB_HOST_PATH:?set BIRDNET_DB_HOST_PATH in .env}:/data/birdnet.db:ro
+      # Persistent volume for app state / future cached rollups
+      - birdnet-analytics-state:/var/lib/birdnet-analytics
+    restart: unless-stopped
+
+volumes:
+  birdnet-analytics-state:
