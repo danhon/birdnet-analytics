@@ -4,19 +4,40 @@ services:
       context: .
     # For running a published multi-arch image later, swap build->image.
     # image: ghcr.io/danhon/birdnet-analytics:latest
+
     ports:
       - "${BIRDNET_ANALYTICS_PORT:-8787}:8787"
+
     environment:
       # Inside-container path; the host path is mounted below.
       BIRDNET_DB_PATH: /data/birdnet.db
       BIRDNET_ANALYTICS_TZ: ${BIRDNET_ANALYTICS_TZ:-America/Los_Angeles}
       # Reserved for persistent app state / future rollups
       BIRDNET_ANALYTICS_STATE_DIR: /var/lib/birdnet-analytics
+
     volumes:
       # Host DB path must be set in .env (read-only)
       - ${BIRDNET_DB_HOST_PATH:?set BIRDNET_DB_HOST_PATH in .env}:/data/birdnet.db:ro
       # Persistent volume for app state / future cached rollups
       - birdnet-analytics-state:/var/lib/birdnet-analytics
+
+    # Security hardening defaults
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+    # Basic healthcheck (no curl needed)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
     restart: unless-stopped
 
 volumes:

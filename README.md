@@ -60,9 +60,29 @@ Logs:
 docker compose logs -f
 ```
 
+Health:
+```sh
+curl -fsS http://127.0.0.1:8787/health || echo "unhealthy"
+docker compose ps
+```
+
 Stop:
 ```sh
 docker compose down
+```
+
+## Dependency updates (uv)
+
+This repo uses `uv.lock` for reproducible installs.
+
+To upgrade dependencies (intentional, reviewable change):
+```sh
+uv lock --upgrade
+uv sync
+```
+Then rebuild the container:
+```sh
+docker compose up --build -d
 ```
 
 ### Option B: local dev (uv)

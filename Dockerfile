@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
+# NOTE: Best practice is to pin base images by digest (e.g. python:3.12-slim@sha256:...).
+# We haven't pinned yet because this repo is currently built locally (no docker client here to
+# resolve digests automatically). When we add publishing/CI, we should pin both base images.
+
 # Build/venv stage (uses uv, which is fast and reproducible)
 FROM ghcr.io/astral-sh/uv:python3.12-slim AS builder
 
