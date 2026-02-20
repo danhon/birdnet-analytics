@@ -40,13 +40,30 @@ cp .env.example .env
 # edit .env and set BIRDNET_DB_HOST_PATH=/absolute/path/to/birdnet.db
 ```
 
-Run:
+Run (daemonized):
 ```sh
-docker compose up --build
+docker compose up --build -d
 ```
 
 What you should see:
+- A running container (`docker compose ps`)
 - A local server at <http://127.0.0.1:8787/>
+
+Update to latest `main`:
+```sh
+git pull
+docker compose up --build -d
+```
+
+Logs:
+```sh
+docker compose logs -f
+```
+
+Stop:
+```sh
+docker compose down
+```
 
 ### Option B: local dev (uv)
 
