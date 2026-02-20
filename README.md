@@ -120,6 +120,52 @@ Project layout:
 Assumptions / invariants:
 - BirdNET-GO’s SQLite DB is the source of truth.
 
+## Dashboard charts (examples)
+
+These screenshots are examples from the current dashboard UI.
+
+### Detections by hour of day
+
+Shows the distribution of detections across the day. Includes a percentile baseline (P10/P50/P90) and an overlay for “today”, plus “% days active” to show how consistently that hour has detections.
+
+![Detections by hour of day](docs/images/detections-hour-of-day.png)
+
+### Dawn chorus (detections / 15 min)
+
+Buckets detections into 15‑minute slices in a configurable window around sunrise (e.g. 90 minutes before → 150 minutes after). Useful for comparing dawn‑chorus intensity day to day.
+
+![Dawn chorus 15-min](docs/images/dawn-chorus-15-min.png)
+
+### Dawn chorus by day (100% stacked)
+
+A 100% stacked view of the dawn window: each day is normalized to sum to 100%, so you can compare the *shape* of activity around sunrise even when absolute totals differ.
+
+![Dawn chorus stacked](docs/images/dawn-chorus-stacked.png)
+
+### Dawn chorus by day (heatmap)
+
+Heatmap version of the dawn window: columns are days, rows are 15‑minute offsets from sunrise, color indicates relative intensity.
+
+![Dawn chorus heatmap](docs/images/dawn-chorus-15-heatmap.png)
+
+### Day parts + precipitation
+
+Splits each day into fixed clock-time “day parts” (00–06, 06–12, 12–18, 18–24) and shows detections per part. Overlays unique species/day and daily precipitation (mm) to spot basic weather correlations.
+
+![Day parts + precip](docs/images/day-parts-fixed-precip.png)
+
+### Week over week
+
+Weekly rollup of total detections and unique species, to track broader trends.
+
+![Week over week](docs/images/week-over-week.png)
+
+### Top-3 share (100% stacked)
+
+For each day, shows what fraction of detections were from the top 3 species (with everything else grouped as “Other”). Useful for spotting days dominated by a few species.
+
+![Top-3 share](docs/images/top-3-share-stacked.png)
+
 ### Decision log
 
 - 2026-02-20 — Start keeping feature/stats ideas in README so collaborators can see the direction.
