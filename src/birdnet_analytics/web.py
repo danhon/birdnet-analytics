@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import os
-import re
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query
@@ -30,15 +29,6 @@ def _resolve_birdnet_db_path() -> Path:
             return p
     raise RuntimeError("Set BIRDNET_DB_PATH or BIRDNET_DB_DIR (containing birdnet.db)")
 
-
-_TS_RE = re.compile(r"\.(\d{6})\d+")
-
-
-def _parse_begin_time(s: str) -> datetime:
-    # Example in DB: '2026-02-16 09:33:43.731828028-08:00'
-    s = s.replace(" ", "T", 1)
-    s = _TS_RE.sub(r".\1", s)  # truncate to microseconds
-    return datetime.fromisoformat(s)
 
 
 def _dawn_buckets_for_day(
@@ -67,12 +57,12 @@ def _dawn_buckets_for_day(
     # Bucket by clock time (e.g. 15-minute increments): 06:00, 06:15, 06:30, ...
     buckets: dict[datetime, int] = {}
     for (bt, conf) in con.execute(
-        "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+        "SELECT d.detected_at, d.confidence FROM detections d WHERE date(d.detected_at, 'unixepoch') = ?",
         (day,),
     ):
         if conf is None or float(conf) < min_confidence:
             continue
-        dt = _parse_begin_time(bt).astimezone(tz)
+        dt = datetime.fromtimestamp(bt, tz=tz)
         if not (start <= dt < end):
             continue
 
@@ -117,12 +107,12 @@ def _dawn_bucket_offsets_for_day(
 
     buckets: dict[int, int] = {}
     for (bt, conf) in con.execute(
-        "SELECT begin_time, confidence FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+        "SELECT d.detected_at, d.confidence FROM detections d WHERE date(d.detected_at, 'unixepoch') = ?",
         (day,),
     ):
         if conf is None or float(conf) < min_confidence:
             continue
-        dt = _parse_begin_time(bt).astimezone(tz)
+        dt = datetime.fromtimestamp(bt, tz=tz)
         if not (start <= dt < end):
             continue
 
@@ -205,7 +195,9 @@ def create_app() -> FastAPI:
 
         db = BirdnetDb(_resolve_birdnet_db_path())
         with db.connect_ro() as con:
-            min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+            min_day, max_day = con.execute(
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+            ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": [], "bucket_labels": [], "days": []}
 
@@ -270,8 +262,10 @@ def create_app() -> FastAPI:
 
         db = BirdnetDb(_resolve_birdnet_db_path())
         with db.connect_ro() as con:
-            # Determine date range from notes.
-            min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+            # Determine date range from detections.
+            min_day, max_day = con.execute(
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+            ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": []}
 
@@ -310,7 +304,7 @@ def create_app() -> FastAPI:
                         upsert_many(wcon, fetched)
                         cached.update(get_cached_range(wcon, start_day, end_day))
 
-            # Iterate per day, bucket notes.begin_time into fixed local-time dayparts.
+            # Iterate per day, bucket detections.detected_at into fixed local-time dayparts.
             cur_day = start_day
             while cur_day <= end_day:
                 day_s = cur_day.isoformat()
@@ -318,14 +312,16 @@ def create_app() -> FastAPI:
                 uniq: set[str] = set()
 
                 for (bt, conf, sci) in con.execute(
-                    "SELECT begin_time, confidence, scientific_name FROM notes WHERE date = ? AND begin_time IS NOT NULL",
+                    """SELECT d.detected_at, d.confidence, l.scientific_name
+                       FROM detections d JOIN labels l ON d.label_id = l.id
+                       WHERE date(d.detected_at, 'unixepoch') = ?""",
                     (day_s,),
                 ):
                     if conf is None or float(conf) < min_confidence:
                         continue
                     if sci:
                         uniq.add(str(sci))
-                    dt = _parse_begin_time(bt).astimezone(tz)
+                    dt = datetime.fromtimestamp(bt, tz=tz)
                     h = dt.hour
                     for name, h0, h1 in parts:
                         if h0 <= h < h1:
@@ -359,10 +355,10 @@ def create_app() -> FastAPI:
             if q == "":
                 rows = con.execute(
                     """
-                    SELECT common_name, COUNT(*) AS c
-                    FROM notes
-                    WHERE common_name IS NOT NULL AND common_name != ''
-                    GROUP BY common_name
+                    SELECT l.scientific_name, COUNT(*) AS c
+                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    WHERE l.scientific_name IS NOT NULL AND l.scientific_name != ''
+                    GROUP BY l.scientific_name
                     ORDER BY c DESC
                     LIMIT ?
                     """,
@@ -372,10 +368,10 @@ def create_app() -> FastAPI:
                 like = f"%{q}%"
                 rows = con.execute(
                     """
-                    SELECT common_name, COUNT(*) AS c
-                    FROM notes
-                    WHERE common_name LIKE ?
-                    GROUP BY common_name
+                    SELECT l.scientific_name, COUNT(*) AS c
+                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    WHERE l.scientific_name LIKE ?
+                    GROUP BY l.scientific_name
                     ORDER BY c DESC
                     LIMIT ?
                     """,
@@ -388,27 +384,28 @@ def create_app() -> FastAPI:
         buckets = {h: 0 for h in range(24)}
         if species:
             q = (
-                "SELECT begin_time, confidence FROM notes "
-                "WHERE common_name = ? AND date >= ? AND date <= ? AND begin_time IS NOT NULL"
+                "SELECT d.detected_at, d.confidence FROM detections d JOIN labels l ON d.label_id = l.id "
+                "WHERE l.scientific_name = ? "
+                "AND date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?"
             )
             params = (species, start_day.isoformat(), end_day.isoformat())
         else:
             q = (
-                "SELECT begin_time, confidence FROM notes "
-                "WHERE date >= ? AND date <= ? AND begin_time IS NOT NULL"
+                "SELECT d.detected_at, d.confidence FROM detections d "
+                "WHERE date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?"
             )
             params = (start_day.isoformat(), end_day.isoformat())
 
         for (bt, conf) in con.execute(q, params):
             if conf is None or float(conf) < min_confidence:
                 continue
-            dt = _parse_begin_time(bt).astimezone(tz)
+            dt = datetime.fromtimestamp(bt, tz=tz)
             buckets[dt.hour] += 1
         return buckets
 
     @app.get("/api/activity/hourly_stats")
     def api_activity_hourly_stats(
-        species: str = Query(default="", description="Optional common name filter"),
+        species: str = Query(default="", description="Optional scientific name filter"),
         tz_name: str = Query(default="", description="IANA tz name (blank = config default)"),
         min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
         mode: str = Query(default="pct", description="pct|minmax"),
@@ -416,7 +413,7 @@ def create_app() -> FastAPI:
         """Hourly activity stats across days: min/max/mean per hour + today's per-hour counts.
 
         - min/max/mean are computed over DAILY counts for each hour-of-day.
-        - today is the latest `notes.date` in the DB.
+        - today is the latest date in detections.detected_at.
         """
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
@@ -426,10 +423,14 @@ def create_app() -> FastAPI:
         with db.connect_ro() as con:
             if species:
                 min_day, max_day = con.execute(
-                    "SELECT min(date), max(date) FROM notes WHERE common_name = ?", (species,)
+                    "SELECT date(min(d.detected_at), 'unixepoch'), date(max(d.detected_at), 'unixepoch') "
+                    "FROM detections d JOIN labels l ON d.label_id = l.id WHERE l.scientific_name = ?",
+                    (species,),
                 ).fetchone()
             else:
-                min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+                min_day, max_day = con.execute(
+                    "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+                ).fetchone()
 
             if not min_day or not max_day:
                 return {"species": species or None, "tz": tz_name_eff, "rows": []}
@@ -538,7 +539,9 @@ def create_app() -> FastAPI:
 
         db = BirdnetDb(_resolve_birdnet_db_path())
         with db.connect_ro() as con:
-            min_day, max_day = con.execute("SELECT min(date), max(date) FROM notes").fetchone()
+            min_day, max_day = con.execute(
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+            ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": []}
 
@@ -561,9 +564,9 @@ def create_app() -> FastAPI:
                 total = 0
                 for bt, conf, name in con.execute(
                     """
-                    SELECT begin_time, confidence, common_name
-                    FROM notes
-                    WHERE date = ? AND begin_time IS NOT NULL
+                    SELECT d.detected_at, d.confidence, l.scientific_name
+                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    WHERE date(d.detected_at, 'unixepoch') = ?
                     """,
                     (day_s,),
                 ):
@@ -605,14 +608,14 @@ def create_app() -> FastAPI:
 
         db = BirdnetDb(_resolve_birdnet_db_path())
         with db.connect_ro() as con:
-            # Find latest begin_time (to anchor the current week)
+            # Find latest detected_at (to anchor the current week)
             row = con.execute(
-                "SELECT begin_time FROM notes WHERE begin_time IS NOT NULL ORDER BY begin_time DESC LIMIT 1"
+                "SELECT detected_at FROM detections ORDER BY detected_at DESC LIMIT 1"
             ).fetchone()
             if not row:
                 return {"tz": tz_name_eff, "rows": []}
 
-            latest = _parse_begin_time(row[0]).astimezone(tz)
+            latest = datetime.fromtimestamp(row[0], tz=tz)
             latest_date = latest.date()
             end_week_start = latest_date - timedelta(days=latest_date.weekday())  # Monday
             start_week_start = end_week_start - timedelta(days=(weeks - 1) * 7)
@@ -627,19 +630,18 @@ def create_app() -> FastAPI:
                 buckets[k] = {"week_start": k, "detections": 0, "species": set()}
                 week += timedelta(days=7)
 
-            # Coarse filter by notes.date (assumed local date). Then parse begin_time to get local week.
+            # Coarse filter by detections.detected_at (UTC date approximation). Then convert to local week.
             for bt, conf, sci in con.execute(
                 """
-                SELECT begin_time, confidence, scientific_name
-                FROM notes
-                WHERE begin_time IS NOT NULL
-                  AND date >= ? AND date <= ?
+                SELECT d.detected_at, d.confidence, l.scientific_name
+                FROM detections d JOIN labels l ON d.label_id = l.id
+                WHERE date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?
                 """,
                 (start_date.isoformat(), end_date.isoformat()),
             ):
                 if conf is None or float(conf) < min_confidence:
                     continue
-                dt = _parse_begin_time(bt).astimezone(tz)
+                dt = datetime.fromtimestamp(bt, tz=tz)
                 d = dt.date()
                 wk = d - timedelta(days=d.weekday())
                 wk_key = wk.isoformat()

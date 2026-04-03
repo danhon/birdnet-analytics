@@ -16,8 +16,8 @@ class BirdnetDb:
 def guess_lat_lon(con: sqlite3.Connection) -> tuple[float, float]:
     cur = con.cursor()
     row = cur.execute(
-        "SELECT latitude, longitude FROM notes WHERE latitude IS NOT NULL AND longitude IS NOT NULL LIMIT 1"
+        "SELECT latitude, longitude FROM detections WHERE latitude IS NOT NULL AND longitude IS NOT NULL LIMIT 1"
     ).fetchone()
     if not row:
-        raise RuntimeError("No latitude/longitude found in notes; cannot compute sunrise")
+        raise RuntimeError("No latitude/longitude found in detections; cannot compute sunrise")
     return float(row[0]), float(row[1])
