@@ -14,7 +14,7 @@ Defaults:
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import sys
@@ -23,12 +23,13 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from zoneinfo import ZoneInfo
+
 from birdnet_analytics.db import BirdnetDb, guess_lat_lon
 from birdnet_analytics.sun import compute_sun_times, dawn_window
 
 
 def _daily_events_sunrise(con: sqlite3.Connection, day: str) -> int | None:
-    # BirdNET-GO schema: daily_events(date TEXT, sunrise INTEGER, sunset INTEGER)
     row = con.execute("SELECT sunrise FROM daily_events WHERE date = ?", (day,)).fetchone()
     if not row:
         return None
@@ -52,6 +53,7 @@ def main() -> None:
     ap.add_argument("--after-min", type=int, default=150)
     args = ap.parse_args()
 
+    tz = ZoneInfo(args.tz)
     db = BirdnetDb(args.db)
     before = timedelta(minutes=args.before_min)
     after = timedelta(minutes=args.after_min)
@@ -59,44 +61,35 @@ def main() -> None:
     with db.connect_ro() as con:
         lat, lon = guess_lat_lon(con)
 
-        # get distinct dates from notes.date (YYYY-MM-DD)
-        days = [r[0] for r in con.execute("SELECT DISTINCT date FROM notes ORDER BY date")]
+        days = [
+            r[0]
+            for r in con.execute(
+                "SELECT DISTINCT date(detected_at, 'unixepoch') FROM detections ORDER BY 1"
+            )
+        ]
 
         print("date\thour_local\tdetections")
         for day in days:
             sunrise_int = _daily_events_sunrise(con, day)
             if sunrise_int is not None:
-                # Can't decode units yet; treat as unsupported until we see nonzero data.
-                # Fall back to Astral.
-                sunrise_dt = None
+                sunrise_dt = datetime.fromtimestamp(sunrise_int, tz=timezone.utc).astimezone(tz)
             else:
-                sunrise_dt = None
-
-            if sunrise_dt is None:
-                sun_times = compute_sun_times(on_date=datetime.fromisoformat(day).date(), latitude=lat, longitude=lon, tz_name=args.tz)
+                sun_times = compute_sun_times(
+                    on_date=datetime.fromisoformat(day).date(),
+                    latitude=lat,
+                    longitude=lon,
+                    tz_name=args.tz,
+                )
                 sunrise_dt = sun_times.sunrise
 
             start, end = dawn_window(sunrise=sunrise_dt, before=before, after=after)
 
-            # SQLite's datetime()/strftime() handling of offsets is inconsistent.
-            # Do timestamp parsing + tz conversion in Python for correctness.
-            from zoneinfo import ZoneInfo
-            import re
-
-            tz = ZoneInfo(args.tz)
-
-            def parse_begin_time(s: str) -> datetime:
-                # Example in this DB: '2026-02-16 09:33:43.731828028-08:00'
-                s = s.replace(" ", "T", 1)
-                # Truncate fractional seconds to microseconds (datetime only supports 6 digits)
-                s = re.sub(r"\.(\d{6})\d+", r".\1", s)
-                return datetime.fromisoformat(s)
-
             buckets: dict[int, int] = {}
-            for (bt,) in con.execute(
-                "SELECT begin_time FROM notes WHERE date = ? AND begin_time IS NOT NULL", (day,)
+            for (ts,) in con.execute(
+                "SELECT detected_at FROM detections WHERE date(detected_at, 'unixepoch') = ?",
+                (day,),
             ):
-                dt = parse_begin_time(bt).astimezone(tz)
+                dt = datetime.fromtimestamp(ts, tz=tz)
                 if start <= dt < end:
                     buckets[dt.hour] = buckets.get(dt.hour, 0) + 1
 
