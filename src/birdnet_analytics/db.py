@@ -10,7 +10,9 @@ class BirdnetDb:
     path: Path
 
     def connect_ro(self) -> sqlite3.Connection:
-        return sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        # immutable=1 bypasses WAL/shm locking — safe because BirdNET-Go
+        # is the sole writer and we never modify the DB.
+        return sqlite3.connect(f"file:{self.path}?mode=ro&immutable=1", uri=True)
 
 
 def guess_lat_lon(con: sqlite3.Connection) -> tuple[float, float]:
