@@ -10,7 +10,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
 
 # Copy only dependency metadata first (better layer caching)
-COPY pyproject.toml uv.lock ./
+# README.md is required by hatchling at build time
+COPY pyproject.toml uv.lock README.md ./
 
 # Create a project venv and sync deps (frozen => uses uv.lock)
 RUN uv venv /app/.venv \
