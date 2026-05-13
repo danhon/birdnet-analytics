@@ -5,7 +5,7 @@
 # resolve digests automatically). When we add publishing/CI, we should pin both base images.
 
 # Build/venv stage (uses uv, which is fast and reproducible)
-FROM ghcr.io/astral-sh/uv:python3.12-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 WORKDIR /app
 
