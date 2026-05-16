@@ -5,6 +5,7 @@ HOST   ?= $(APP).$(DOMAIN)
 .PHONY: deploy preview logs stop
 
 deploy:
+	git pull
 	COMPOSE_PROJECT_NAME=$(APP) \
 	SERVICE_HOST=$(HOST) \
 	docker compose up -d --build
