@@ -105,6 +105,7 @@ uv run python scripts/print_schema.py /path/to/birdnet.db
 Run the web dashboard locally:
 ```sh
 export BIRDNET_DB_PATH=/path/to/birdnet.db
+export BIRDNET_TAXONOMY_PATH=/path/to/birdnet-go-app/config/models/shared/taxonomy.csv  # optional
 export BIRDNET_ANALYTICS_TZ=America/Los_Angeles
 uv run uvicorn birdnet_analytics.web:app --reload --port 8787
 ```
@@ -119,6 +120,16 @@ Project layout:
 
 Assumptions / invariants:
 - BirdNET-GO’s SQLite DB is the source of truth.
+- **Birds only.** Queries read `bird_detections`, a temp view that
+  `BirdnetDb.connect_ro()` creates on each connection, never `detections`
+  directly. BirdNET-Go also reports BirdNET v2.4's sound classes (`Engine`,
+  `Dog`, `Power tools`, ...) — stored as class Aves, so the DB can't filter
+  them — plus mammals and frogs from Perch v2 and BirdNET v3.0. The view keeps
+  labels whose name is `class_name == aves` in BirdNET-Go's `taxonomy.csv`
+  (`BIRDNET_TAXONOMY_PATH`). Without that file it falls back to dropping only
+  the sound classes. The CLI scripts in `scripts/` still read raw `detections`.
+- BirdNET-Go keeps one label per `(scientific_name, model_id)` and runs
+  several models, so group by `scientific_name`, never `label_id`.
 
 ## Dashboard charts (examples)
 
@@ -169,6 +180,7 @@ For each day, shows what fraction of detections were from the top 3 species (wit
 ### Decision log
 
 - 2026-02-20 — Start keeping feature/stats ideas in README so collaborators can see the direction.
+- 2026-10-22 — Chart birds only, using BirdNET-Go's `taxonomy.csv`. The container now runs as the host user (uid 1000), because that file is mode 600.
 
 ## Data sources
 

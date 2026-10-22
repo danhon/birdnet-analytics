@@ -6,8 +6,14 @@ services:
     env_file: .env
     environment:
       BIRDNET_DB_PATH: /data/birdnet.db
+      BIRDNET_TAXONOMY_PATH: /data/taxonomy.csv
       BIRDNET_ANALYTICS_TZ: ${BIRDNET_ANALYTICS_TZ:-America/Los_Angeles}
       BIRDNET_ANALYTICS_STATE_DIR: /var/lib/birdnet-analytics
+
+    # Run as the host user that owns ~/birdnet-go-app: BirdNET-Go writes
+    # taxonomy.csv mode 600, so the image's own appuser (10001) can't read
+    # it. Both mounts are read-only and the state volume is unused.
+    user: "${BIRDNET_HOST_UID:-1000}:${BIRDNET_HOST_GID:-1000}"
 
     networks: [traefik_default]
     restart: unless-stopped
@@ -28,6 +34,9 @@ services:
 
     volumes:
       - ${BIRDNET_DB_HOST_PATH:?set BIRDNET_DB_HOST_PATH in .env}:/data/birdnet.db:ro
+      # BirdNET-Go's species taxonomy, used to chart birds only. If missing,
+      # only BirdNET's sound classes (Engine, Dog, ...) are filtered out.
+      - ${BIRDNET_TAXONOMY_HOST_PATH:-/home/danhon/birdnet-go-app/config/models/shared/taxonomy.csv}:/data/taxonomy.csv:ro
       - birdnet-analytics-state:/var/lib/birdnet-analytics
 
     read_only: true

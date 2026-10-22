@@ -14,6 +14,7 @@ class Settings:
     root_path: str
     tz_name: str
     refresh_seconds: int
+    taxonomy_path: Path | None
 
 
 def _getenv(name: str, default: str | None = None) -> str | None:
@@ -32,6 +33,8 @@ def load_settings() -> Settings:
     root_path = _getenv("BIRDNET_ANALYTICS_ROOT_PATH", "") or ""
     tz_name = _getenv("BIRDNET_ANALYTICS_TZ", "America/Los_Angeles") or "America/Los_Angeles"
     refresh_seconds = int(_getenv("BIRDNET_ANALYTICS_REFRESH_SECONDS", "30") or "30")
+    # BirdNET-Go's taxonomy.csv, used to keep only birds (class aves).
+    taxonomy_path = _getenv("BIRDNET_TAXONOMY_PATH")
 
     return Settings(
         db_dir=Path(db_dir) if db_dir else None,
@@ -41,4 +44,5 @@ def load_settings() -> Settings:
         root_path=root_path,
         tz_name=tz_name,
         refresh_seconds=refresh_seconds,
+        taxonomy_path=Path(taxonomy_path) if taxonomy_path else None,
     )

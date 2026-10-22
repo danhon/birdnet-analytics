@@ -30,6 +30,11 @@ def _resolve_birdnet_db_path() -> Path:
     raise RuntimeError("Set BIRDNET_DB_PATH or BIRDNET_DB_DIR (containing birdnet.db)")
 
 
+def _open_db() -> BirdnetDb:
+    # Every query reads bird_detections (birds only), set up by connect_ro().
+    return BirdnetDb(_resolve_birdnet_db_path(), load_settings().taxonomy_path)
+
+
 
 def _dawn_buckets_for_day(
     *,
@@ -57,7 +62,7 @@ def _dawn_buckets_for_day(
     # Bucket by clock time (e.g. 15-minute increments): 06:00, 06:15, 06:30, ...
     buckets: dict[datetime, int] = {}
     for (bt, conf) in con.execute(
-        "SELECT d.detected_at, d.confidence FROM detections d WHERE date(d.detected_at, 'unixepoch') = ?",
+        "SELECT d.detected_at, d.confidence FROM bird_detections d WHERE date(d.detected_at, 'unixepoch') = ?",
         (day,),
     ):
         if conf is None or float(conf) < min_confidence:
@@ -107,7 +112,7 @@ def _dawn_bucket_offsets_for_day(
 
     buckets: dict[int, int] = {}
     for (bt, conf) in con.execute(
-        "SELECT d.detected_at, d.confidence FROM detections d WHERE date(d.detected_at, 'unixepoch') = ?",
+        "SELECT d.detected_at, d.confidence FROM bird_detections d WHERE date(d.detected_at, 'unixepoch') = ?",
         (day,),
     ):
         if conf is None or float(conf) < min_confidence:
@@ -158,8 +163,7 @@ def create_app() -> FastAPI:
     ):
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
-        db_path = _resolve_birdnet_db_path()
-        db = BirdnetDb(db_path)
+        db = _open_db()
         with db.connect_ro() as con:
             rows = _dawn_buckets_for_day(
                 con=con,
@@ -193,10 +197,10 @@ def create_app() -> FastAPI:
         tz = ZoneInfo(tz_name_eff)
         limit_days = _parse_days_param(days)
 
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             min_day, max_day = con.execute(
-                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM bird_detections"
             ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": [], "bucket_labels": [], "days": []}
@@ -260,11 +264,11 @@ def create_app() -> FastAPI:
         tz = ZoneInfo(tz_name_eff)
         limit_days = _parse_days_param(days)
 
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             # Determine date range from detections.
             min_day, max_day = con.execute(
-                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM bird_detections"
             ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": []}
@@ -313,7 +317,7 @@ def create_app() -> FastAPI:
 
                 for (bt, conf, sci) in con.execute(
                     """SELECT d.detected_at, d.confidence, l.scientific_name
-                       FROM detections d JOIN labels l ON d.label_id = l.id
+                       FROM bird_detections d JOIN labels l ON d.label_id = l.id
                        WHERE date(d.detected_at, 'unixepoch') = ?""",
                     (day_s,),
                 ):
@@ -350,13 +354,13 @@ def create_app() -> FastAPI:
         limit: int = Query(default=20, ge=1, le=200),
     ):
         q = (q or "").strip()
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             if q == "":
                 rows = con.execute(
                     """
                     SELECT l.scientific_name, COUNT(*) AS c
-                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    FROM bird_detections d JOIN labels l ON d.label_id = l.id
                     WHERE l.scientific_name IS NOT NULL AND l.scientific_name != ''
                     GROUP BY l.scientific_name
                     ORDER BY c DESC
@@ -369,7 +373,7 @@ def create_app() -> FastAPI:
                 rows = con.execute(
                     """
                     SELECT l.scientific_name, COUNT(*) AS c
-                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    FROM bird_detections d JOIN labels l ON d.label_id = l.id
                     WHERE l.scientific_name LIKE ?
                     GROUP BY l.scientific_name
                     ORDER BY c DESC
@@ -384,14 +388,14 @@ def create_app() -> FastAPI:
         buckets = {h: 0 for h in range(24)}
         if species:
             q = (
-                "SELECT d.detected_at, d.confidence FROM detections d JOIN labels l ON d.label_id = l.id "
+                "SELECT d.detected_at, d.confidence FROM bird_detections d JOIN labels l ON d.label_id = l.id "
                 "WHERE l.scientific_name = ? "
                 "AND date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?"
             )
             params = (species, start_day.isoformat(), end_day.isoformat())
         else:
             q = (
-                "SELECT d.detected_at, d.confidence FROM detections d "
+                "SELECT d.detected_at, d.confidence FROM bird_detections d "
                 "WHERE date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?"
             )
             params = (start_day.isoformat(), end_day.isoformat())
@@ -419,17 +423,17 @@ def create_app() -> FastAPI:
         tz = ZoneInfo(tz_name_eff)
         species = (species or "").strip()
 
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             if species:
                 min_day, max_day = con.execute(
                     "SELECT date(min(d.detected_at), 'unixepoch'), date(max(d.detected_at), 'unixepoch') "
-                    "FROM detections d JOIN labels l ON d.label_id = l.id WHERE l.scientific_name = ?",
+                    "FROM bird_detections d JOIN labels l ON d.label_id = l.id WHERE l.scientific_name = ?",
                     (species,),
                 ).fetchone()
             else:
                 min_day, max_day = con.execute(
-                    "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+                    "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM bird_detections"
                 ).fetchone()
 
             if not min_day or not max_day:
@@ -537,10 +541,10 @@ def create_app() -> FastAPI:
         tz = ZoneInfo(tz_name_eff)
         limit_days = _parse_days_param(days)
 
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             min_day, max_day = con.execute(
-                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM detections"
+                "SELECT date(min(detected_at), 'unixepoch'), date(max(detected_at), 'unixepoch') FROM bird_detections"
             ).fetchone()
             if not min_day or not max_day:
                 return {"tz": tz_name_eff, "rows": []}
@@ -565,7 +569,7 @@ def create_app() -> FastAPI:
                 for bt, conf, name in con.execute(
                     """
                     SELECT d.detected_at, d.confidence, l.scientific_name
-                    FROM detections d JOIN labels l ON d.label_id = l.id
+                    FROM bird_detections d JOIN labels l ON d.label_id = l.id
                     WHERE date(d.detected_at, 'unixepoch') = ?
                     """,
                     (day_s,),
@@ -606,11 +610,11 @@ def create_app() -> FastAPI:
         tz_name_eff = tz_name.strip() or settings.tz_name
         tz = ZoneInfo(tz_name_eff)
 
-        db = BirdnetDb(_resolve_birdnet_db_path())
+        db = _open_db()
         with db.connect_ro() as con:
             # Find latest detected_at (to anchor the current week)
             row = con.execute(
-                "SELECT detected_at FROM detections ORDER BY detected_at DESC LIMIT 1"
+                "SELECT detected_at FROM bird_detections ORDER BY detected_at DESC LIMIT 1"
             ).fetchone()
             if not row:
                 return {"tz": tz_name_eff, "rows": []}
@@ -634,7 +638,7 @@ def create_app() -> FastAPI:
             for bt, conf, sci in con.execute(
                 """
                 SELECT d.detected_at, d.confidence, l.scientific_name
-                FROM detections d JOIN labels l ON d.label_id = l.id
+                FROM bird_detections d JOIN labels l ON d.label_id = l.id
                 WHERE date(d.detected_at, 'unixepoch') >= ? AND date(d.detected_at, 'unixepoch') <= ?
                 """,
                 (start_date.isoformat(), end_date.isoformat()),
