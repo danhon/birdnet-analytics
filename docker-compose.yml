@@ -25,7 +25,7 @@ services:
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.tls.certresolver=le"
       - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=8787"
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.middlewares=authelia@file"
-      - "homepage.group=Applications"
+      - "homepage.group=Birds"
       - "homepage.name=BirdNET Analytics"
       - "homepage.icon=mdi-chart-line"
       - "homepage.href=https://${SERVICE_HOST}"
