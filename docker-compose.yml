@@ -47,8 +47,10 @@ services:
     tmpfs:
       - /tmp
 
+    # A raw-socket script, not a urllib one-liner, whose imports cost 2-3x
+    # the CPU: see src/birdnet_analytics/healthcheck.py.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health').read()"]
+      test: ["CMD", "python3", "-I", "-S", "/app/src/birdnet_analytics/healthcheck.py"]
       interval: 30s
       timeout: 5s
       retries: 3
