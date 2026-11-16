@@ -1,0 +1,19 @@
+# fleet.yml: what birdnet-analytics says it is, for fleet-check (reverse-proxy
+# docs-site/docs/services/fleet-check.md). The waivers are bootstrapped, for the
+# gaps found when the gate started (reverse-proxy#15); the issue named ends them.
+service: birdnet-analytics
+kind: web
+host: birdnet-analytics.sgc.rayandhon.com
+internet: false
+issue: 10
+waivers:
+- {check: healthz, until: 2026-12-15, issue: 10, why: liveness endpoint or healthcheck
+    missing, bootstrap: true}
+- {check: mem-limit, until: 2026-12-15, issue: 10, why: no mem_limit yet, bootstrap: true}
+- {check: log-mount, until: 2026-12-15, issue: 10, why: not logging to ~/<app>-logs
+    yet, bootstrap: true}
+- {check: venv-cache, until: 2026-12-15, issue: 10, why: Dockerfile predates the .venv
+    cache rules, bootstrap: true}
+- {check: build-sha, until: 2026-12-15, issue: 10, why: image records no commit, bootstrap: true}
+- {check: clean-deploy, until: 2026-12-15, issue: 10, why: checkout not clean or not
+    at the running commit, bootstrap: true}
