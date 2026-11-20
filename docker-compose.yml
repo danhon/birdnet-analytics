@@ -1,5 +1,11 @@
 services:
   birdnet-analytics:
+    # LOG-3: to the journal; VictoriaLogs shows it as source:<compose project>.
+    logging:
+      driver: journald
+      options:
+        tag: "{{.Name}}"
+        labels: com.docker.compose.project
     build:
       context: .
 
